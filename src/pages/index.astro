@@ -1,0 +1,11 @@
+---
+import Base from '../layouts/Base.astro';
+---
+<Base title="web-pi">
+  <console-app></console-app>
+</Base>
+
+<script>
+  // Island: registers <console-app> (and its children) as custom elements.
+  import '../components/console-app';
+</script>

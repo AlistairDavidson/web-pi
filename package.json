@@ -1,0 +1,27 @@
+{
+  "name": "web-pi",
+  "version": "0.1.0",
+  "description": "pi coding-agent sessions in the browser — Astro static build + web components + one small Node server (terminal over WebSocket → tmux)",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build && tsc -p tsconfig.server.json",
+    "start": "node dist-server/server/main.js",
+    "set-password": "node dist-server/server/set-password.js"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
+    "astro": "^7.0.0",
+    "node-pty": "^1.0.0",
+    "typescript": "^5.8.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "@types/ws": "^8.18.2"
+  }
+}

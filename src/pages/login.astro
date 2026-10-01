@@ -1,0 +1,38 @@
+---
+import Base from '../layouts/Base.astro';
+---
+<Base title="web-pi — sign in">
+  <main class="login-card">
+    <h1>web-pi</h1>
+    <form id="login-form">
+      <label>username <input id="username" autocomplete="username" autofocus></label>
+      <label>password <input id="password" type="password" autocomplete="current-password"></label>
+      <button type="submit">sign in</button>
+      <p id="error" class="error hidden"></p>
+    </form>
+  </main>
+</Base>
+
+<script>
+  import { BASE } from '../base';
+  document.getElementById('login-form')!.addEventListener('submit', async e => {
+    e.preventDefault();
+    const err = document.getElementById('error')!;
+    err.classList.add('hidden');
+    const res = await fetch(`${BASE}/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: (document.getElementById('username') as HTMLInputElement).value,
+        password: (document.getElementById('password') as HTMLInputElement).value,
+      }),
+    });
+    if (res.ok) { location.href = `${BASE}/`; return; }
+    err.textContent = res.status === 429 ? 'too many attempts — wait 15 minutes' : 'invalid credentials';
+    err.classList.remove('hidden');
+  });
+</script>
+
+<style define:vars={{}}>
+  body { display: flex; align-items: center; justify-content: center; height: 100vh; }
+</style>
