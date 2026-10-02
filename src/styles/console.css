@@ -32,8 +32,19 @@ console-app wa-page::part(menu) {
 console-app wa-page::part(navigation-header) {
   border-bottom: var(--wa-border-width-s) solid var(--wa-color-surface-border);
 }
+/* App shell: pin the page to the host height. WA sizes its interior with
+   min-heights only, so content — the terminal's rendered rows — drives the
+   page height: the box ends up exactly as tall as the xterm content, the
+   ResizeObserver never fires when the viewport shrinks, and the page
+   scrolls instead. With base pinned, WA's minmax(0, 1fr) tracks clamp
+   every inner level to the remaining space. */
+console-app wa-page::part(base) { height: 100%; min-height: 0; }
+/* body's align-items:start would leave main start-aligned and content-
+   sized; stretch it into its minmax(0, 1fr) track so the chain below is
+   height-definite all the way to .term-box. */
+console-app wa-page::part(main) { align-self: stretch; }
 console-app main {
-  display: flex; flex-direction: column; min-width: 0; min-height: 100%;
+  display: flex; flex-direction: column; min-width: 0; height: 100%;
   padding: 0; /* wa-page pads <main> by default; the terminal wants it all */
 }
 .nav-header {

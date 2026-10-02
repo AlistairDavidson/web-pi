@@ -8,6 +8,34 @@ import { MARKER, PASSWORD, USERNAME } from './env';
 
 const FIXTURE_A = '11111111-1111-1111-1111-111111111111';
 
+/** Terminal sizing invariants, evaluated in the page:
+ *  - the app shell is viewport-locked: the terminal never makes the page
+ *    taller than the viewport (no page scrollbar);
+ *  - the rendered rows fill .term-box (the xterm screen reaches the bottom
+ *    of the box within one cell row) — i.e. the terminal tracks the
+ *    available space, not its own previously rendered size. */
+async function waitForTerminalFitted(page: Page, timeout = 5000): Promise<void> {
+  await page.waitForFunction(() => {
+    const el = document.querySelector('agent-terminal');
+    const box = document.querySelector('agent-terminal .term-box');
+    const screen = document.querySelector('agent-terminal .term-box .xterm-screen');
+    if (!el || !box || !screen) return false;
+    const rows = (el as unknown as { term?: { rows: number } }).term?.rows ?? 0;
+    if (rows <= 0) return false;
+    const b = box.getBoundingClientRect();
+    const s = screen.getBoundingClientRect();
+    const cellH = s.height / rows;
+    return document.documentElement.scrollHeight <= window.innerHeight + 1
+      && b.height - s.height <= cellH + 1;
+  }, null, { timeout });
+}
+
+async function termRows(page: Page): Promise<number> {
+  return page.evaluate(() =>
+    (document.querySelector('agent-terminal') as unknown as { term: { rows: number } })
+      .term.rows);
+}
+
 async function login(page: Page): Promise<void> {
   await page.goto('/login');
   await page.fill('wa-input#username input', USERNAME);
@@ -76,6 +104,26 @@ test('resume a past session from the sidebar', async ({ page }) => {
   await page.click(`session-sidebar li[data-resume="${FIXTURE_A}"]`);
   await expect(page.locator('.term-status.ok')).toContainText('attached', { timeout: 20_000 });
   await expect(page.locator('agent-terminal .term-box')).toContainText(MARKER);
+});
+
+test('terminal fills the available space and refits when it shrinks', async ({ page }) => {
+  await login(page);
+
+  // Attach so the status bar is in its final state before measuring.
+  await page.fill('wa-input#new-name input', 'itest-fill');
+  await page.click('wa-button#new-btn');
+  await expect(page.locator('.term-status.ok')).toContainText('attached', { timeout: 20_000 });
+
+  // At load the terminal must fill the viewport-height box without
+  // pushing the page past the viewport.
+  await waitForTerminalFitted(page);
+  const rowsBefore = await termRows(page);
+
+  // Shrink the viewport: the available space drops, so the box must shrink
+  // and the terminal must refit to fewer rows — still filling the box.
+  await page.setViewportSize({ width: 1280, height: 500 });
+  await waitForTerminalFitted(page);
+  expect(await termRows(page)).toBeLessThan(rowsBefore);
 });
 
 test('login rate limit kicks in (10 per 15 min per IP)', async ({ request }) => {
