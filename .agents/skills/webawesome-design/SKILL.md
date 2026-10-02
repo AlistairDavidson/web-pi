@@ -7,11 +7,10 @@ description: >
   Web Awesome-based design system or make new UI consistent with the rest of an app; or wants output that
   looks intentionally designed rather than merely functional. Triggers include "build a landing page",
   "make an app layout", "set up <wa-page>", "add a sidebar", "apply a theme", "match our brand color",
-  "use our design system", "make this consistent with the rest of the app", "extend our theme", "style
-  this to look designed", "build a settings page", "lay out a dashboard", and any question about wa-*
-  layout utilities or --wa-* tokens. Covers layout (<wa-page> vs. utilities), theming, composition, and
-  extending the system for a project. Pairs with the webawesome skill, which documents individual
-  component APIs.
+  "use our design system", "make this consistent", "extend our theme", "style this to look designed",
+  "build a settings page", "lay out a dashboard", and any question about wa-* layout utilities or --wa-*
+  tokens. Covers layout (<wa-page> vs. utilities), theming, composition, and extending the system for a
+  project. Pairs with the webawesome skill, which documents individual component APIs.
 license: MIT / Commercial (for Web Awesome Pro)
 metadata:
   version: "3.14.0"
