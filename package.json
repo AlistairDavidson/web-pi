@@ -10,7 +10,8 @@
     "dev": "astro dev",
     "build": "astro build && tsc -p tsconfig.server.json",
     "start": "node dist-server/server/main.js",
-    "set-password": "node dist-server/server/set-password.js"
+    "set-password": "node dist-server/server/set-password.js",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@astrojs/node": "^11.1.6",
@@ -24,6 +25,7 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
     "@types/node": "^26.6.3",
     "@types/ws": "^8.18.2"
   }

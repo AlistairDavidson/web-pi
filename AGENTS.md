@@ -3,6 +3,17 @@
 Notes for coding agents working in this repo. Overview + architecture: see
 README.md.
 
+## Testing
+
+`npm run test:e2e` — Playwright integration tests (chromium; browser must
+exist in ~/.cache/ms-playwright). Fully hermetic: the config boots
+`dist-server/server/main.js` against a `/tmp/web-pi-itest` workspace (own
+auth file, fixture pi sessions, dedicated `web-pi-itest` tmux socket, a
+deterministic `cmd.sh` session command). Tests must stay serial
+(workers: 1): they share the per-IP login rate-limit budget and the tmux
+socket, and the rate-limit test must run last. Build first (`npm run build`)
+or let global-setup do it when dist/ is missing.
+
 ## Web Awesome (wa-*) components: SSR imports ≠ client imports
 
 Astro frontmatter imports are **server-only**. Importing

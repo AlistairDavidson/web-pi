@@ -3,3 +3,5 @@ auth.json
 dist/
 dist-server/
 .astro/
+test-results/
+playwright-report/
