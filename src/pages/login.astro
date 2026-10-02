@@ -1,20 +1,37 @@
 ---
 import Base from '../layouts/Base.astro';
+// Frontmatter imports SSR these components (astro-lit) and register them
+// client-side via the shared bundle.
+import '@awesome.me/webawesome/dist/components/card/card.js';
+import '@awesome.me/webawesome/dist/components/input/input.js';
+import '@awesome.me/webawesome/dist/components/button/button.js';
+import '@awesome.me/webawesome/dist/components/callout/callout.js';
+import '@awesome.me/webawesome/dist/components/icon/icon.js';
 ---
 <Base title="web-pi — sign in">
-  <main class="login-card">
-    <h1>web-pi</h1>
-    <form id="login-form">
-      <label>username <input id="username" autocomplete="username" autofocus></label>
-      <label>password <input id="password" type="password" autocomplete="current-password"></label>
-      <button type="submit">sign in</button>
-      <p id="error" class="error hidden"></p>
-    </form>
+  <main class="login-main wa-stack">
+    <wa-card class="login-card">
+      <h1><wa-icon name="terminal"></wa-icon> web-pi</h1>
+      <form id="login-form" class="wa-stack wa-gap-m">
+        <wa-input id="username" label="username" autocomplete="username" autofocus></wa-input>
+        <wa-input
+          id="password"
+          label="password"
+          type="password"
+          password-toggle
+          autocomplete="current-password"
+        ></wa-input>
+        <wa-button type="submit" variant="brand">sign in</wa-button>
+        <wa-callout id="error" variant="danger" class="hidden"></wa-callout>
+      </form>
+    </wa-card>
   </main>
 </Base>
 
 <script>
   import { BASE } from '../base';
+  const value = (id: string): string =>
+    (document.getElementById(id) as unknown as { value: string }).value;
   document.getElementById('login-form')!.addEventListener('submit', async e => {
     e.preventDefault();
     const err = document.getElementById('error')!;
@@ -22,17 +39,10 @@ import Base from '../layouts/Base.astro';
     const res = await fetch(`${BASE}/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        username: (document.getElementById('username') as HTMLInputElement).value,
-        password: (document.getElementById('password') as HTMLInputElement).value,
-      }),
+      body: JSON.stringify({ username: value('username'), password: value('password') }),
     });
     if (res.ok) { location.href = `${BASE}/`; return; }
     err.textContent = res.status === 429 ? 'too many attempts — wait 15 minutes' : 'invalid credentials';
     err.classList.remove('hidden');
   });
 </script>
-
-<style define:vars={{}}>
-  body { display: flex; align-items: center; justify-content: center; height: 100vh; }
-</style>

@@ -1,9 +1,18 @@
-// console-app.ts — <console-app>: orchestrates sidebar ↔ terminal, state
-// polling, logout. Top-level island wired in index.astro.
+// console-app.ts — <console-app>: orchestrates sidebar ↔ terminal on a
+// <wa-page> app shell (sidebar + free mobile drawer), state polling,
+// logout, toasts. Top-level island wired in index.astro.
 import type { ConsoleState } from '../lib/types';
 import { BASE } from '../base';
+import '@awesome.me/webawesome/dist/components/page/page.js';
+import '@awesome.me/webawesome/dist/components/button/button.js';
+import '@awesome.me/webawesome/dist/components/toast/toast.js';
 import './agent-terminal';
 import './session-sidebar';
+
+/** Minimal typing for <wa-toast>.create(). */
+type WaToast = HTMLElement & {
+  create(message: string, options?: Record<string, unknown>): Promise<unknown>;
+};
 
 export class ConsoleApp extends HTMLElement {
   private pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -11,20 +20,21 @@ export class ConsoleApp extends HTMLElement {
 
   connectedCallback(): void {
     this.innerHTML = `
-      <aside class="sidebar">
-        <header>
-          <h1>web-pi</h1>
-          <button id="logout" title="sign out">sign out</button>
+      <wa-page>
+        <header slot="navigation-header" class="nav-header wa-split">
+          <h1><wa-icon name="terminal"></wa-icon> web-pi</h1>
+          <wa-button id="logout" appearance="plain" size="s">
+            <wa-icon slot="start" name="right-from-bracket"></wa-icon>
+            sign out
+          </wa-button>
         </header>
-        <session-sidebar></session-sidebar>
-      </aside>
-      <main class="main">
-        <agent-terminal></agent-terminal>
-      </main>`;
+        <session-sidebar slot="navigation"></session-sidebar>
+        <main><agent-terminal></agent-terminal></main>
+      </wa-page>
+      <wa-toast placement="bottom-start"></wa-toast>`;
 
     const term = this.querySelector('agent-terminal') as
       import('./agent-terminal').AgentTerminal & HTMLElement;
-    const sidebar = this.querySelector('session-sidebar') as HTMLElement;
 
     this.addEventListener('attach-live', e => {
       const name = (e as CustomEvent<string>).detail;
@@ -45,7 +55,10 @@ export class ConsoleApp extends HTMLElement {
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({ error: 'could not create session' }));
-        alert((err as { error?: string }).error ?? 'could not create session');
+        const msg = (err as { error?: string }).error ?? 'could not create session';
+        (this.querySelector('wa-toast') as WaToast | null)?.create(msg, {
+          variant: 'danger', icon: 'triangle-exclamation', duration: 6000,
+        });
         return;
       }
       const out = await r.json() as { name: string };
@@ -61,7 +74,6 @@ export class ConsoleApp extends HTMLElement {
 
     this.loadState();
     this.pollTimer = setInterval(() => this.loadState(), 15000);
-    requestAnimationFrame(() => term.refit());
   }
 
   disconnectedCallback(): void {
