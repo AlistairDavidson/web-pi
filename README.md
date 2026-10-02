@@ -114,6 +114,10 @@ shape is recommended.
 - `src/lib` — shared strict TS: auth (scrypt + sessions + rate limiter),
   tmux helpers, pi session-store parser, wire types
 - `server` — the Node server: Astro SSR (middleware) + assets + REST + WS → node-pty → tmux
+- `.agents/skills/` — Web Awesome docs as pi skills: `webawesome` (component
+  API reference) + `webawesome-design` (layout/theming/tokens), copied
+  version-locked from the installed package by `tools/build_webawesome_skills.py`
+  — rerun it after bumping `@awesome.me/webawesome`
 
 Using Web Awesome in a page (SSR pattern — server import in frontmatter,
 client import in a `<script>` so it hydrates):
