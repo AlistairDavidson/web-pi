@@ -1,5 +1,11 @@
 ---
 // Base layout: html shell + global styles (no framework CSS).
+// Web Awesome default theme (layers + native styles + utilities + default
+// theme tokens). Astro bundles it with the page; import order vs console.css
+// is safe — Web Awesome styles live in cascade layers, console.css is
+// unlayered and always wins.
+import '@awesome.me/webawesome/dist/styles/webawesome.css';
+
 interface Props { title: string }
 const { title } = Astro.props;
 ---
@@ -15,6 +21,14 @@ const { title } = Astro.props;
     <slot />
   </body>
 </html>
+
+<script>
+  // Web Awesome SSR hydration: declarative-shadow-DOM polyfill + hydration
+  // support. Must run before any wa-* component is imported on the client,
+  // hence hoisted here in the shared layout ahead of page island scripts.
+  import '@awesome.me/astro-lit/dsd-polyfill.js';
+  import '@awesome.me/astro-lit/hydration-support.js';
+</script>
 
 <style is:global>
   @import '../styles/console.css';

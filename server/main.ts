@@ -1,12 +1,13 @@
 // main.ts — web-pi server.
-// One process: serves the Astro static build (pages/assets), the REST API,
-// and the WS→node-pty→tmux terminal. Loopback by default; put it behind
-// a TLS reverse proxy (deploy/nginx-webpi.conf). Config: WEB_PI_* env
-// (README table).
+// One process: serves the Astro SSR build (pages via the middleware handler,
+// hashed assets statically), the REST API, and the WS→node-pty→tmux
+// terminal. Loopback by default; put it behind a TLS reverse proxy
+// (deploy/nginx-webpi.conf). Config: WEB_PI_* env (README table).
 import * as http from 'node:http';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { WebSocketServer, type WebSocket } from 'ws';
 // @ts-ignore — no bundled types for the native module
 import * as pty from 'node-pty';
@@ -34,6 +35,7 @@ const CFG = {
   // dist-server/server/main.js → app root is two levels up
   authFile: process.env.WEB_PI_AUTH_FILE ?? path.join(__dirname, '..', '..', 'auth.json'),
   clientDir: process.env.WEB_PI_CLIENT_DIR ?? path.join(__dirname, '..', '..', 'dist', 'client'),
+  astroEntry: process.env.WEB_PI_ASTRO_ENTRY ?? path.join(__dirname, '..', '..', 'dist', 'server', 'entry.mjs'),
   // pi's own session-store resolution, mirrored (pi env docs):
   // PI_CODING_AGENT_SESSION_DIR, else PI_CODING_AGENT_DIR/sessions (default ~/.pi/agent).
   sessionsDir: process.env.WEB_PI_SESSIONS_DIR
@@ -100,6 +102,26 @@ function authed(req: http.IncomingMessage): boolean {
   return auth.valid(Auth.parseCookies(req.headers.cookie).webpi_session);
 }
 
+// ---------- Astro SSR (middleware) ----------
+// The Astro build emits an ESM handler (dist/server/entry.mjs); loaded once
+// via dynamic import (the compiled server here is CJS). Page routes render
+// through it; the `next` fallback covers unknown paths (404).
+type AstroHandler =
+  (req: http.IncomingMessage, res: http.ServerResponse, next: (err?: unknown) => void) => void;
+
+const astroReady: Promise<AstroHandler> =
+  import(pathToFileURL(CFG.astroEntry).href)
+    .then((m: { handler: AstroHandler }) => m.handler);
+astroReady.catch(err => console.error(
+  `astro SSR entry failed to load (${CFG.astroEntry}) — did 'npm run build' run?):`,
+  (err as Error)?.message ?? err));
+
+function renderAstro(req: http.IncomingMessage, res: http.ServerResponse): void {
+  astroReady
+    .then(handler => handler(req, res, () => send(res, 404, 'not found')))
+    .catch(err => { console.error('astro handler error', err); send(res, 500, 'render failed'); });
+}
+
 // ---------- HTTP ----------
 const server = http.createServer((req, res) => {
   const url = (req.url ?? '').split('?')[0]!;
@@ -129,10 +151,11 @@ const server = http.createServer((req, res) => {
 
   // Everything below requires a valid session...
   if (!authed(req)) {
-    // ...except the login page shell + its hashed assets (page decides what
-    // to render; every data/terminal route stays 401).
+    // ...except the login page + its hashed assets (every data/terminal
+    // route stays 401).
     if (req.method === 'GET' && (url === CFG.base || url === CFG.base + '/' || url === route('/login'))) {
-      sendClientFile(res, 'login/index.html', false); // Astro static route shape
+      req.url = route('/login'); // render the login page whatever the shell URL
+      renderAstro(req, res);
       return;
     }
     if (req.method === 'GET' && url.startsWith(route('/_astro/'))) {
@@ -170,11 +193,18 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Authenticated page + asset routes.
+  // Authenticated: hashed assets served statically; /login is pointless
+  // when signed in (redirect); every other GET goes to the Astro SSR
+  // handler (page routes; unknown paths 404 via next). API routes above
+  // have already returned.
   if (req.method === 'GET') {
-    if (url === CFG.base || url === CFG.base + '/') { sendClientFile(res, 'index.html', false); return; }
-    if (url === route('/login')) { sendClientFile(res, 'index.html', false); return; }
     if (url.startsWith(route('/_astro/'))) { sendClientFile(res, url.slice(CFG.base.length), true); return; }
+    if (url === route('/login')) {
+      res.writeHead(302, { Location: CFG.base === '/' ? '/' : CFG.base }).end();
+      return;
+    }
+    renderAstro(req, res);
+    return;
   }
 
   send(res, 404, 'not found');

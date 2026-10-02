@@ -5,9 +5,11 @@
 sessions in a terminal in your browser — new sessions, past-session resume,
 live attach — all backed by tmux so nothing is lost when the tab closes.
 
-One Node process serves everything: the static pages (Astro build), a JSON
-API, and a WebSocket that bridges xterm.js to tmux via node-pty. No runtime
-SSR, no framework on the client — just web components.
+One Node process serves everything: the Astro SSR pages (middleware
+handler), the JSON API, and a WebSocket that bridges xterm.js to tmux via
+node-pty. No framework on the client — just web components, with
+[Web Awesome](https://webawesome.com/) (default theme, SSR'd) as the UI
+toolkit.
 
 ```
 Browser (xterm.js)
@@ -69,7 +71,8 @@ Everything is env-configured; defaults suit a single-user Linux box running
 | `WEB_PI_COMMAND` | `pi` | command run in a new session (whitespace-split; resume appends `--session <id>` — only pi-family CLIs support that) |
 | `WEB_PI_TMUX_SOCKET` | `web-pi` | the tmux socket the app owns |
 | `WEB_PI_AUTH_FILE` | `<app root>/auth.json` | credential file (0400) |
-| `WEB_PI_CLIENT_DIR` | `<app root>/dist/client` | Astro build output |
+| `WEB_PI_CLIENT_DIR` | `<app root>/dist/client` | Astro hashed assets |
+| `WEB_PI_ASTRO_ENTRY` | `<app root>/dist/server/entry.mjs` | Astro SSR handler |
 
 Run under a dedicated unprivileged user (the app spawns a terminal — treat
 it as a web shell by design). Don't run it as root, don't put a sudo-wielding
@@ -104,12 +107,26 @@ shape is recommended.
 
 ## Project shape
 
-- `src/pages`, `src/layouts` — Astro static pages (login + app shell)
+- `src/pages`, `src/layouts` — Astro pages (login + app shell), SSR'd
+- `src/layouts/Base.astro` — Web Awesome default theme + SSR hydration scripts
 - `src/components` — web components: `<console-app>`, `<session-sidebar>`,
   `<agent-terminal>` (xterm.js island)
 - `src/lib` — shared strict TS: auth (scrypt + sessions + rate limiter),
   tmux helpers, pi session-store parser, wire types
-- `server` — the Node server: static serving + REST + WS → node-pty → tmux
+- `server` — the Node server: Astro SSR (middleware) + assets + REST + WS → node-pty → tmux
+
+Using Web Awesome in a page (SSR pattern — server import in frontmatter,
+client import in a `<script>` so it hydrates):
+
+```astro
+---
+import '@awesome.me/webawesome/dist/components/button/button.js';
+---
+<wa-button>go</wa-button>
+<script>
+  import '@awesome.me/webawesome/dist/components/button/button.js';
+</script>
+```
 
 ## License
 
