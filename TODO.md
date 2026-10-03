@@ -1,6 +1,18 @@
-Pi should be a dependency and this project should keep it up to date and control the pi config / mcps / skills / extensions.
+bump @xterm/xterm to 6.0.0 + fit ^0.11 (drop-in for our small API surface)
 
-apps folder that contains git subprojects
+xterm addons:
+1. webgl renderer - biggest win for pi's full-screen TUI redraws; onContextLoss -> dispose falls back to DOM; lazy-import so it never blocks first paint
+2. web-links - one-liner, URLs in agent output become clickable; custom handler later for copy-to-clipboard
+3. search addon + ctrl+F bar (wa-input cluster in terminal toolbar, NOT the session sidebar - 15s innerHTML poll eats state)
+    server backfill via `tmux capture-pane -S -5000 -p` written to WS on attach so resumed sessions have searchable scrollback
+4. clipboard addon - OSC 52 yank from vim/tmux inside a session to the real clipboard (tmux needs set-clipboard on)
+5. serialize - "download transcript" / "copy output" button, zero server changes; maybe e2e assertions on terminal state 
+
+Pi should be a dependency and this project should keep it up to date and control the pi config / mcps / skills / extensions when deployed/installed (dev should not alter any global config).
+
+tmux is also effectively a dependency and tmux config is certainly vital to a successful deployment - handle as much in-project as we can.
+
+apps folder that contains git submodules
 
 console is an app
 
@@ -44,7 +56,23 @@ DB backend (pi-durable supplies this?)
 
 when it stabilises, build on pi-durable (is tmux still necessary with this?)
 
-PWA
+Make app a PWA
+
+typed env vars - env.schema in astro.config.mjs → import from 'astro:env/server'
+
+validation-enhancer
+zod, astro/zod
+
+app management mcp
+how to build an app skills
+
+grab soothing-booking's approach to APIs and error handling
+
+low priority xterm official addons:
+  unicode-graphemes - emoji/combining chars currently render wrong-width in agent output (6.0-only on npm, experimental)
+
+  font decision first, then: bundled mono webfont via web-fonts addon (needs xterm 6.1-beta) + ligatures if a ligature font
+  skip: attach (our WS JSON protocol is richer: attach modes, resize, errors, status), canvas (deprecated, removed in xterm 6)
 
 Human:
 Skills and other methods to enforce my coding patterns
