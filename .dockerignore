@@ -1,0 +1,10 @@
+.git
+node_modules
+dist
+dist-server
+.astro
+.pi-agent
+auth.json
+test-results
+playwright-report
+.fleet
