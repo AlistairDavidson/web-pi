@@ -40,6 +40,27 @@ async function termDims(page: Page): Promise<{ cols: number; rows: number }> {
   });
 }
 
+/** Wait until the terminal's buffer contains `text`.
+ *  Asserts on the buffer, not the DOM: the WebGL renderer draws rows to a
+ *  canvas, so .terminal-container has no text nodes to assert on. */
+async function waitForTermText(page: Page, text: string, timeout = 10_000): Promise<void> {
+  await page.waitForFunction(
+    marker => {
+      const el = document.querySelector('agent-terminal') as unknown as
+        | { terminal?: { buffer: { active: { length: number; getLine(i: number): { translateToString(trimRight?: boolean): string } | undefined } } } }
+        | null;
+      const buf = el?.terminal?.buffer.active;
+      if (!buf) return false;
+      for (let i = 0; i < buf.length; i++) {
+        if (buf.getLine(i)?.translateToString(true).includes(marker)) return true;
+      }
+      return false;
+    },
+    text,
+    { timeout }
+  );
+}
+
 async function termRows(page: Page): Promise<number> {
   return (await termDims(page)).rows;
 }
@@ -79,6 +100,15 @@ test('login lands on the console with fixture sessions in the sidebar', async ({
   await expect(page.locator('console-app wa-page')).toHaveCount(1);
   await expect(page.locator('agent-terminal .terminal-container .xterm')).toHaveCount(1);
 
+  // The WebGL renderer is lazy-imported as an async chunk; once it loads,
+  // xterm swaps its DOM rows for canvas rendering (the addon mounts >1
+  // canvas, so assert presence, not an exact count). Headless Chromium has
+  // SwiftShader WebGL, so the renderer should engage.
+  await page.waitForFunction(
+    () => document.querySelectorAll('agent-terminal .terminal-container canvas').length > 0,
+    null, { timeout: 10_000 }
+  );
+
   const nav = page.locator('session-sidebar .nav');
   await expect(nav).toContainText('fix the login bug in auth module');
   await expect(nav).toContainText('refactor the tmux helpers');
@@ -95,23 +125,22 @@ test('new session: created, attached, terminal round-trips input', async ({ page
   await expect(page.locator('session-sidebar li[data-live="itest-live"]')).toHaveCount(1);
 
   // WS attach → tmux → banner from the session command appears in xterm.
-  const term = page.locator('agent-terminal .terminal-container');
-  await expect(term).toContainText(MARKER, { timeout: 20_000 });
+  await waitForTermText(page, MARKER, 20_000);
   await expect(page.locator('.terminal-status.ok')).toContainText('attached');
 
   // Full loop: keystrokes in xterm → WS → pty → tmux → output rendered.
   // $((41+1)) distinguishes the shell's evaluated output (TYPIST_42) from
   // the locally echoed command line (which contains the expression).
-  await term.click();
+  await page.locator('agent-terminal .terminal-container').click();
   await page.keyboard.type('echo TYPIST_$((41+1))\n');
-  await expect(term).toContainText('TYPIST_42', { timeout: 10_000 });
+  await waitForTermText(page, 'TYPIST_42', 10_000);
 });
 
 test('resume a past session from the sidebar', async ({ page }) => {
   await login(page);
   await page.click(`session-sidebar li[data-resume="${FIXTURE_A}"]`);
   await expect(page.locator('.terminal-status.ok')).toContainText('attached', { timeout: 20_000 });
-  await expect(page.locator('agent-terminal .terminal-container')).toContainText(MARKER);
+  await waitForTermText(page, MARKER);
 });
 
 test('attached session opens at the browser terminal\'s size, not 80x24', async ({ page }) => {

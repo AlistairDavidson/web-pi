@@ -2,6 +2,7 @@
 // Light DOM (xterm injects its own styles; global CSS applies).
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import '@awesome.me/webawesome/dist/components/spinner/spinner.js';
 import '@awesome.me/webawesome/dist/components/icon/icon.js';
@@ -39,6 +40,10 @@ export class AgentTerminal extends HTMLElement {
 
     this.terminal.open(terminalContainer);
 
+    // URLs in agent output become clickable (a custom handler — e.g.
+    // copy-to-clipboard instead of navigate — can come later).
+    this.terminal.loadAddon(new WebLinksAddon());
+
     this.fitXtermAddon.fit();
 
     this.terminal.onData(d =>
@@ -55,6 +60,21 @@ export class AgentTerminal extends HTMLElement {
     this.resizeObserver.observe(terminalContainer);
 
     this.fitXtermAddon.fit();
+
+    // WebGL renderer — the big win for pi's full-screen TUI redraws.
+    // Lazy-imported so the chunk never blocks first paint. Disposing the
+    // addon (on context loss; or never loading it if WebGL is missing)
+    // leaves xterm on its built-in DOM renderer.
+    void import('@xterm/addon-webgl')
+      .then(({ WebglAddon }) => {
+        if (!this.terminal) return;
+        try {
+          const webgl = new WebglAddon();
+          webgl.onContextLoss(() => webgl.dispose());
+          this.terminal.loadAddon(webgl);
+        } catch { /* no WebGL: stay on the DOM renderer */ }
+      })
+      .catch(() => { /* chunk failed to load: stay on the DOM renderer */ });
   }
 
   disconnectedCallback(): void {

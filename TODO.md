@@ -1,8 +1,6 @@
-bump @xterm/xterm to 6.0.0 + fit ^0.11 (drop-in for our small API surface)
+DONE bump @xterm/xterm to 6.0.0 + fit ^0.11 (drop-in for our small API surface)
 
 xterm addons:
-1. webgl renderer - biggest win for pi's full-screen TUI redraws; onContextLoss -> dispose falls back to DOM; lazy-import so it never blocks first paint
-2. web-links - one-liner, URLs in agent output become clickable; custom handler later for copy-to-clipboard
 3. search addon + ctrl+F bar (wa-input cluster in terminal toolbar, NOT the session sidebar - 15s innerHTML poll eats state)
     server backfill via `tmux capture-pane -S -5000 -p` written to WS on attach so resumed sessions have searchable scrollback
 4. clipboard addon - OSC 52 yank from vim/tmux inside a session to the real clipboard (tmux needs set-clipboard on)
