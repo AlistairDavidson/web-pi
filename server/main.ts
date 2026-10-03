@@ -7,6 +7,7 @@ import * as http from 'node:http';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { execFile } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { WebSocketServer, type WebSocket } from 'ws';
 // @ts-ignore — no bundled types for the native module
@@ -26,25 +27,71 @@ function normalizeBase(raw: string): string {
 }
 
 const home = process.env.WEB_PI_HOME ?? os.homedir();
+// dist-server/server/main.js → app root is two levels up
+const appRoot = path.join(__dirname, '..', '..');
+
+// pi ships as an npm dependency: prefer the vendored binary, fall back to a
+// pi on PATH only if it's missing (partial deploy, WEB_PI_COMMAND override).
+const piBin = path.join(appRoot, 'node_modules', '.bin', 'pi');
+
+// Controlled pi config. `pi/` in the repo is the versioned template
+// (settings.json, mcp.json, skills/, extensions/, …); the runtime agent dir
+// below is what spawned pi actually uses (PI_CODING_AGENT_DIR) — seeded
+// from the template at boot, so sessions never read or write ~/.pi/agent.
+const agentDir = process.env.WEB_PI_AGENT_DIR
+  ?? process.env.PI_CODING_AGENT_DIR
+  ?? path.join(appRoot, '.pi-agent');
+const agentTemplate = path.join(appRoot, 'pi');
 
 const CFG = {
   host: process.env.WEB_PI_HOST ?? '127.0.0.1',
   port: parseInt(process.env.WEB_PI_PORT ?? '3000', 10),
   base: normalizeBase(process.env.WEB_PI_BASE ?? '/'),
   home,
-  // dist-server/server/main.js → app root is two levels up
-  authFile: process.env.WEB_PI_AUTH_FILE ?? path.join(__dirname, '..', '..', 'auth.json'),
-  clientDir: process.env.WEB_PI_CLIENT_DIR ?? path.join(__dirname, '..', '..', 'dist', 'client'),
-  astroEntry: process.env.WEB_PI_ASTRO_ENTRY ?? path.join(__dirname, '..', '..', 'dist', 'server', 'entry.mjs'),
+  agentDir,
+  authFile: process.env.WEB_PI_AUTH_FILE ?? path.join(appRoot, 'auth.json'),
+  clientDir: process.env.WEB_PI_CLIENT_DIR ?? path.join(appRoot, 'dist', 'client'),
+  astroEntry: process.env.WEB_PI_ASTRO_ENTRY ?? path.join(appRoot, 'dist', 'server', 'entry.mjs'),
   // pi's own session-store resolution, mirrored (pi env docs):
-  // PI_CODING_AGENT_SESSION_DIR, else PI_CODING_AGENT_DIR/sessions (default ~/.pi/agent).
+  // PI_CODING_AGENT_SESSION_DIR, else <agent dir>/sessions — the runtime
+  // agent dir by default, so the sidebar lists where spawned pi writes.
   sessionsDir: process.env.WEB_PI_SESSIONS_DIR
     ?? process.env.PI_CODING_AGENT_SESSION_DIR
-    ?? path.join(process.env.PI_CODING_AGENT_DIR ?? path.join(home, '.pi', 'agent'), 'sessions'),
+    ?? path.join(agentDir, 'sessions'),
   newSessionCwd: process.env.WEB_PI_NEW_SESSION_CWD ?? home,
   // whitespace-split command line; resume appends --session <id> (pi-family CLI)
-  command: (process.env.WEB_PI_COMMAND ?? 'pi').trim().split(/\s+/).filter(Boolean),
+  command: (process.env.WEB_PI_COMMAND ?? (fs.existsSync(piBin) ? piBin : 'pi'))
+    .trim().split(/\s+/).filter(Boolean),
 };
+
+/** Seed the runtime agent dir from the versioned template: template files
+ *  and dirs overwrite their runtime counterparts (the repo is the source of
+ *  truth for config); state only pi writes (auth.json, sessions/, caches)
+ *  isn't in the template and is left alone. */
+function seedAgentDir(): void {
+  try {
+    fs.mkdirSync(CFG.agentDir, { recursive: true });
+    if (!fs.existsSync(agentTemplate)) return;
+    for (const entry of fs.readdirSync(agentTemplate)) {
+      fs.cpSync(path.join(agentTemplate, entry), path.join(CFG.agentDir, entry), { recursive: true });
+    }
+  } catch (err) {
+    console.warn(`could not seed pi agent dir (${CFG.agentDir}):`, (err as Error).message);
+  }
+}
+seedAgentDir();
+
+// Environment for processes spawned inside tmux sessions (pi). Delivered
+// per-session via `tmux new-session -e` — deterministic no matter when the
+// tmux server (and its inherited env) was started — and set on the tmux
+// client calls too, so a freshly started server inherits the same values.
+const sessionEnv: Record<string, string> = {
+  HOME: CFG.home,
+  PI_CODING_AGENT_DIR: CFG.agentDir,
+};
+if (process.env.PI_CODING_AGENT_SESSION_DIR) {
+  sessionEnv.PI_CODING_AGENT_SESSION_DIR = process.env.PI_CODING_AGENT_SESSION_DIR;
+}
 
 /** Route path under the configured base ('/login' → '/foo/login'). */
 const route = (p: string): string => (CFG.base === '/' ? p : CFG.base + p);
@@ -185,7 +232,7 @@ const server = http.createServer((req, res) => {
       const name = raw.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-')
         .replace(/^-+|-+$/g, '').slice(0, 30);
       if (!name) { send(res, 400, 'name required'); return; }
-      tmux.newSession(name, CFG.newSessionCwd, CFG.command, err2 => {
+      tmux.newSession(name, CFG.newSessionCwd, CFG.command, sessionEnv, err2 => {
         if (err2) { sendJSON(res, 409, { error: 'could not create session (name taken?)' }); return; }
         sendJSON(res, 200, { name });
       });
@@ -241,6 +288,7 @@ function attach(ws: WebSocket): void {
   function spawnTmux(args: string[], label: string): boolean {
     const env = Object.assign({}, process.env, {
       TERM: 'xterm-256color', COLORTERM: 'truecolor', HOME: CFG.home,
+      PI_CODING_AGENT_DIR: CFG.agentDir,
     });
     let x: Pty;
     try {
@@ -283,7 +331,7 @@ function attach(ws: WebSocket): void {
           try { if (fs.statSync(found.cwd).isDirectory()) cwd = found.cwd; } catch { /* fallback */ }
         }
         const short = 'r-' + found.id.slice(0, 8);
-        tmux.resumeSession(short, cwd, CFG.command, found.id, err => {
+        tmux.resumeSession(short, cwd, CFG.command, found.id, sessionEnv, err => {
           if (err) { wsSend(ws, { type: 'error', message: 'could not start resume session' }); return; }
           spawnTmux([short], short);
         });
@@ -298,4 +346,9 @@ function attach(ws: WebSocket): void {
 server.listen(CFG.port, CFG.host, () => {
   console.log(`web-pi listening on ${CFG.host}:${CFG.port} base ${CFG.base} ` +
     `(tmux socket ${tmux.SOCKET}, command "${CFG.command.join(' ')}", client ${CFG.clientDir}, sessions ${CFG.sessionsDir})`);
+  // Best-effort vendored-pi version at boot — makes dependency drift visible.
+  if (CFG.command[0] === piBin) {
+    execFile(piBin, ['--version'], { timeout: 5000 }, (err, out) =>
+      console.log(err ? `pi: version check failed (${(err as Error).message})` : `pi ${String(out).trim()}`));
+  }
 });

@@ -13,10 +13,20 @@ export const NAME_RE = /^[a-zA-Z0-9_-]{1,40}$/;
 
 type Cb<T> = (err: Error | null, out: T) => void;
 
-function tmux(socket: string, args: string[], cb: (err: Error | null, stdout: string) => void): void {
-  execFile('tmux', ['-L', socket, ...args], { timeout: 5000 }, (err, stdout) => {
-    cb(err instanceof Error ? err : null, typeof stdout === 'string' ? stdout : '');
-  });
+function tmux(socket: string, args: string[], cb: (err: Error | null, stdout: string) => void,
+  env?: Record<string, string>): void {
+  execFile('tmux', ['-L', socket, ...args],
+    { timeout: 5000, ...(env ? { env: Object.assign({}, process.env, env) } : {}) },
+    (err, stdout) => {
+      cb(err instanceof Error ? err : null, typeof stdout === 'string' ? stdout : '');
+    });
+}
+
+/** `-e NAME=value` args for new-session: per-session environment, so the
+ *  spawned command's env doesn't depend on when the tmux server (and the
+ *  env it inherited at startup) came up. */
+function envArgs(env: Record<string, string>): string[] {
+  return Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
 }
 
 /** Live sessions on the app socket. [] on error/no server yet. */
@@ -42,21 +52,22 @@ export function hasSession(name: string, cb: Cb<boolean>): void {
   tmux(SOCKET, ['has-session', '-t', name], err => cb(null, !err));
 }
 
-/** Start a session running the configured command (default: pi). */
+/** Start a session running the configured command (default: vendored pi). */
 export function newSession(name: string, cwd: string, command: string[],
-  cb: (err: Error | null) => void): void {
+  env: Record<string, string>, cb: (err: Error | null) => void): void {
   if (!NAME_RE.test(name)) { cb(new Error('invalid session name')); return; }
-  tmux(SOCKET, ['new-session', '-d', '-s', name, '-c', cwd, '--', ...command], err => cb(err));
+  tmux(SOCKET, ['new-session', '-d', '-s', name, '-c', cwd, ...envArgs(env), '--', ...command],
+    err => cb(err), env);
 }
 
 /** Start (or reuse) a resume session; the caller then attaches. */
 export function resumeSession(shortName: string, cwd: string, command: string[],
-  sessionId: string, cb: (err: Error | null) => void): void {
+  sessionId: string, env: Record<string, string>, cb: (err: Error | null) => void): void {
   hasSession(shortName, (err, exists) => {
     if (err) { cb(err); return; }
     if (exists) { cb(null); return; }
     tmux(SOCKET,
-      ['new-session', '-d', '-s', shortName, '-c', cwd, '--', ...command, '--session', sessionId],
-      e2 => cb(e2));
+      ['new-session', '-d', '-s', shortName, '-c', cwd, ...envArgs(env), '--', ...command, '--session', sessionId],
+      e2 => cb(e2), env);
   });
 }

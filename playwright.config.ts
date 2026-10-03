@@ -27,6 +27,7 @@ export default defineConfig({
       WEB_PI_HOST: '127.0.0.1',
       WEB_PI_AUTH_FILE: `${WORKSPACE}/auth.json`,
       WEB_PI_SESSIONS_DIR: `${WORKSPACE}/sessions`,
+      WEB_PI_AGENT_DIR: `${WORKSPACE}/pi-agent`,
       WEB_PI_NEW_SESSION_CWD: WORKSPACE,
       WEB_PI_TMUX_SOCKET: TMUX_SOCKET,
       WEB_PI_COMMAND: `${WORKSPACE}/cmd.sh`,

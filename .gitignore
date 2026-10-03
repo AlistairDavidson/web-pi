@@ -5,3 +5,4 @@ dist-server/
 .astro/
 test-results/
 playwright-report/
+.pi-agent/

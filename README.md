@@ -38,7 +38,7 @@ tmux socket ── session per tab ── pi ── ~/.pi/agent/sessions/
 ## Requirements
 
 - Node ≥ 20 (a C++ toolchain for `node-pty`: build-essential / g++ / python3)
-- `tmux` and `pi` on PATH (or point `WEB_PI_COMMAND` at your pi binary)
+- `tmux` on PATH — pi ships as an npm dependency (`npm install` vendors it)
 - Linux (node-pty + tmux; developed on Debian)
 
 ## Quick start
@@ -83,9 +83,10 @@ Everything is env-configured; defaults suit a single-user Linux box running
 | `WEB_PI_PORT` | `3000` | Listen port |
 | `WEB_PI_BASE` | `/` | URL base path, e.g. `/console` when riding an existing site. **Baked into the pages at build time** — set it before `npm run build` *and* at runtime |
 | `WEB_PI_HOME` | `os.homedir()` | `HOME` for spawned processes (tmux, pi) |
-| `WEB_PI_SESSIONS_DIR` | pi's own resolution: `PI_CODING_AGENT_SESSION_DIR`, else `$PI_CODING_AGENT_DIR/sessions` (default `~/.pi/agent/sessions`) | where to list past pi sessions from |
+| `WEB_PI_AGENT_DIR` | `PI_CODING_AGENT_DIR`, else `<app root>/.pi-agent` | runtime pi agent dir (config, credentials, sessions for spawned pi) — seeded from the repo's `pi/` template at every boot |
+| `WEB_PI_SESSIONS_DIR` | `PI_CODING_AGENT_SESSION_DIR`, else `<agent dir>/sessions` | where to list past pi sessions from |
 | `WEB_PI_NEW_SESSION_CWD` | `$WEB_PI_HOME` | cwd for new sessions |
-| `WEB_PI_COMMAND` | `pi` | command run in a new session (whitespace-split; resume appends `--session <id>` — only pi-family CLIs support that) |
+| `WEB_PI_COMMAND` | `<app root>/node_modules/.bin/pi` (falls back to `pi` on PATH) | command run in a new session (whitespace-split; resume appends `--session <id>` — only pi-family CLIs support that) |
 | `WEB_PI_TMUX_SOCKET` | `web-pi` | the tmux socket the app owns |
 | `WEB_PI_AUTH_FILE` | `<app root>/auth.json` | credential file (0400) |
 | `WEB_PI_CLIENT_DIR` | `<app root>/dist/client` | Astro hashed assets |
@@ -95,6 +96,26 @@ Everything is env-configured; defaults suit a single-user Linux box running
 Run under a dedicated unprivileged user (the app spawns a terminal — treat
 it as a web shell by design). Don't run it as root, don't put a sudo-wielding
 user behind it.
+
+## Pi: dependency & config isolation
+
+pi is a versioned dependency (`@earendil-works/pi-coding-agent` in
+`package.json`; the vendored binary is logged at boot), not something
+installed on the box. Its config is project-controlled too:
+
+- [`pi/`](pi/) in the repo is the **template** — settings, `mcp.json`,
+  skills, extensions; whatever the install should ship to every session.
+- The **runtime agent dir** (default `<app root>/.pi-agent`, gitignored) is
+  seeded from it at every server boot: template files overwrite, state only
+  pi writes (`auth.json`, `sessions/`) is preserved.
+- Spawned sessions run with `PI_CODING_AGENT_DIR=<runtime dir>` (delivered
+  via `tmux new-session -e`, deterministic per session) — they never touch
+  your `~/.pi/agent`, in either direction.
+
+Consequences: web-pi sessions don't see credentials already in your global
+pi config — `/login` once inside a session (or seed the runtime
+`auth.json`); past sessions from `~/.pi/agent/sessions` don't show in the
+sidebar unless you point `WEB_PI_SESSIONS_DIR` there.
 
 ## Deploying
 

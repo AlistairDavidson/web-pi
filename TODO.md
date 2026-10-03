@@ -4,9 +4,13 @@ tmux is also effectively a dependency and tmux config is certainly vital to a su
 
 apps folder that contains git submodules
 
+update pi button
+
 console is an app
 
 Top menu with all apps
+
+
 
 deploy whole project not just dist to server, so you can do AI dev including self-modification right on server
 
@@ -69,6 +73,7 @@ low priority xterm official addons:
   serialize - "download transcript" / "copy output" button, zero server changes; maybe e2e assertions on terminal state 
 
 Human:
+make sidebar much nicer - rebuild step by step, maybe
 Skills and other methods to enforce my coding patterns
 Write a refined agent workflow
 HIG skill
