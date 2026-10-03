@@ -1,5 +1,3 @@
-Fix terminal not fitting on open
-
 Pi should be a dependency and this project should keep it up to date and control the pi config / mcps / skills / extensions.
 
 apps folder that contains git subprojects

@@ -3,8 +3,9 @@
 // sidebar's pi-session fixtures, and the full terminal round trip
 // (xterm → WS → node-pty → tmux → back).
 // Runs serially (workers: 1) — see playwright.config.ts.
+import { execFileSync } from 'node:child_process';
 import { expect, test, type Page } from '@playwright/test';
-import { MARKER, PASSWORD, USERNAME } from './env';
+import { MARKER, PASSWORD, TMUX_SOCKET, USERNAME } from './env';
 
 const FIXTURE_A = '11111111-1111-1111-1111-111111111111';
 
@@ -30,10 +31,17 @@ async function waitForTerminalFitted(page: Page, timeout = 5000): Promise<void> 
   }, null, { timeout });
 }
 
+/** The browser terminal's current cols/rows. */
+async function termDims(page: Page): Promise<{ cols: number; rows: number }> {
+  return page.evaluate(() => {
+    const t = (document.querySelector('agent-terminal') as unknown as { terminal: { cols: number; rows: number } })
+      .terminal;
+    return { cols: t.cols, rows: t.rows };
+  });
+}
+
 async function termRows(page: Page): Promise<number> {
-  return page.evaluate(() =>
-    (document.querySelector('agent-terminal') as unknown as { terminal: { rows: number } })
-      .terminal.rows);
+  return (await termDims(page)).rows;
 }
 
 async function login(page: Page): Promise<void> {
@@ -104,6 +112,30 @@ test('resume a past session from the sidebar', async ({ page }) => {
   await page.click(`session-sidebar li[data-resume="${FIXTURE_A}"]`);
   await expect(page.locator('.terminal-status.ok')).toContainText('attached', { timeout: 20_000 });
   await expect(page.locator('agent-terminal .terminal-container')).toContainText(MARKER);
+});
+
+test('attached session opens at the browser terminal\'s size, not 80x24', async ({ page }) => {
+  await login(page);
+
+  // The client sends {attach} then {resize} back-to-back on WS open; the
+  // server must carry that size across its async tmux lookup and spawn the
+  // pty at it (regression: resize was dropped pre-spawn, so the session
+  // opened 80x24 in the corner of a larger browser terminal).
+  await page.fill('wa-input#new-name input', 'itest-openfit');
+  await page.click('wa-button#new-btn');
+  await expect(page.locator('.terminal-status.ok')).toContainText('attached', { timeout: 20_000 });
+  await waitForTerminalFitted(page);
+
+  const dims = await termDims(page);
+  expect(dims.cols).toBeGreaterThan(100); // default viewport is far wider than 80
+
+  const pane = execFileSync('tmux',
+    ['-L', TMUX_SOCKET, 'display-message', '-p', '-t', 'itest-openfit:0.0', '#{pane_width}x#{pane_height}'],
+    { encoding: 'utf8' }).trim();
+  const [w, h] = pane.split('x').map(Number) as [number, number];
+  expect(w).toBe(dims.cols);
+  // tmux's status line takes one row of the attached client.
+  expect(h).toBeGreaterThanOrEqual(dims.rows - 1);
 });
 
 test('terminal fills the available space and refits when it shrinks', async ({ page }) => {

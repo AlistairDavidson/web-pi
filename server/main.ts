@@ -232,6 +232,11 @@ function wsSend(ws: WebSocket, msg: ServerMsg): void {
 
 function attach(ws: WebSocket): void {
   let p: Pty | null = null;
+  // The client sends {attach} and {resize} back-to-back on open, but the
+  // pty only exists after an async tmux lookup — remember the requested
+  // size and spawn at it, or the session opens at 80x24 inside a larger
+  // browser terminal ("terminal not fitting on open").
+  let size = { cols: 80, rows: 24 };
 
   function spawnTmux(args: string[], label: string): boolean {
     const env = Object.assign({}, process.env, {
@@ -240,7 +245,7 @@ function attach(ws: WebSocket): void {
     let x: Pty;
     try {
       x = pty.spawn('tmux', ['-L', tmux.SOCKET, 'attach', '-d', '-t', ...args],
-        { name: 'xterm-256color', cols: 80, rows: 24, cwd: CFG.newSessionCwd, env }) as Pty;
+        { name: 'xterm-256color', cols: size.cols, rows: size.rows, cwd: CFG.newSessionCwd, env }) as Pty;
     } catch (e) {
       wsSend(ws, { type: 'error', message: 'spawn failed: ' + (e as Error).message });
       return false;
@@ -257,10 +262,11 @@ function attach(ws: WebSocket): void {
     let msg: ClientMsg; try { msg = JSON.parse(Buffer.from(raw as Buffer).toString('utf8')) as ClientMsg; } catch { return; }
     if (msg.type === 'input' && p) {
       p.write(msg.data.slice(0, 4096));
-    } else if (msg.type === 'resize' && p) {
+    } else if (msg.type === 'resize') {
       const c = Math.min(Math.max(parseInt(String(msg.cols), 10) || 80, 10), 500);
       const r = Math.min(Math.max(parseInt(String(msg.rows), 10) || 24, 4), 200);
-      try { p.resize(c, r); } catch { /* race on exit */ }
+      size = { cols: c, rows: r };
+      if (p) { try { p.resize(c, r); } catch { /* race on exit */ } }
     } else if (msg.type === 'attach' && !p) {
       if (msg.mode === 'live') {
         const target = String(msg.target ?? '');
