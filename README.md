@@ -52,25 +52,47 @@ npm start                     # serves on http://127.0.0.1:3000
 
 Put it behind TLS (any reverse proxy) before exposing it anywhere — the
 cookie is `Secure` and login POSTs shouldn't cross plain HTTP. See
-`deploy/` for a systemd unit, an nginx reverse-proxy block with WebSocket
-upgrade, and a fail2ban jail for failed logins.
+`deploy/` for an nginx reverse-proxy block with WebSocket upgrade, and a
+fail2ban jail for failed logins. Container route:
+
+```sh
+docker compose up -d        # builds the image, serves on 127.0.0.1:3000
+```
 
 ## Developing
 
-Two processes: `astro dev` serves the pages (HMR), but the REST API and
-the terminal WS live in the Node server, not in Astro. In dev the Vite
-server proxies `/api`, `/ws`, and login/logout POSTs to it:
+**In the container** (same image as production):
+
+```sh
+docker compose --profile dev up dev   # astro dev :4321 + API/WS :3001
+```
+
+The repo is bind-mounted into the container at `/app`; `node_modules` is a
+shadow volume so the container builds its own native deps (`node-pty`)
+without touching the host's. First boot npm-installs (a few minutes);
+later boots self-heal in seconds. Everything is real: `auth.json` login,
+session listing, live attach — and pi sessions start in `/app` (the repo),
+self-modification included. Page edits hot-reload through the bind mount.
+
+Notes:
+- The repo bind uses the `:z` volume flag — required on SELinux-enforcing
+  hosts (relabels the tree `container_file_t`), a no-op elsewhere.
+- Dev shares ports 3001/4321 with the host flow below — run one or the
+  other, not both.
+
+**On the host** (no docker): two processes — `astro dev` serves the pages
+(HMR), but the REST API and the terminal WS live in the Node server, not in
+Astro; the Vite server proxies `/api`, `/ws`, and login/logout POSTs to it:
 
 ```sh
 npm run dev:server   # API + WS half on :3001 (compiles dist-server first)
 npm run dev          # astro dev on :4321, proxying to the dev API server
 ```
 
-Everything works against the dev server as it does in production — real
-`auth.json` login, session listing, live attach — and page edits hot-reload.
-Override the proxy target with `WEB_PI_DEV_API` if you run the API half
-elsewhere. The login rate limit is in-memory: restart `dev:server` to clear
-it while iterating on the login page.
+Everything works against the dev server as it does in production, and the
+login rate limit is in-memory: restart `dev:server` to clear it while
+iterating on the login page. Override the proxy target with `WEB_PI_DEV_API`
+if you run the API half elsewhere.
 
 ## Configuration (environment)
 

@@ -1,0 +1,82 @@
+# web-pi — one image, two modes.
+#
+#   prod:  docker compose up -d             → loopback :3000, reverse-proxy TLS in front
+#   dev:   docker compose --profile dev up  → dev servers with the repo bind-mounted
+#
+# Both modes treat /app as the living project: prod seeds a named volume
+# from the image on first boot (never re-seeds); dev bind-mounts the host
+# checkout. pi is an npm dependency pinned by the lockfile — image rebuilds
+# are for toolchain/app changes; pi updates happen in place on the volume.
+
+name: web-pi
+
+services:
+  webpi:
+    build:
+      context: .
+      args:
+        # Baked into the pages at build time AND needed at runtime — keep in sync.
+        WEB_PI_BASE: ${WEB_PI_BASE:-/}
+    image: web-pi:local
+    ports:
+      - "127.0.0.1:3000:3000" # loopback publish; TLS reverse proxy in front (deploy/)
+    environment:
+      WEB_PI_BASE: ${WEB_PI_BASE:-/}
+      WEB_PI_NEW_SESSION_CWD: /app # sessions start in the living project
+    volumes:
+      - webpi-app:/app
+    restart: unless-stopped
+
+  # One-shot: empty named volumes are created root-owned; the dev service
+  # runs as uid 1000 and must write node_modules. Runs on every `up` — a
+  # no-op chown once ownership is right. (Entrypoint overridden: without the
+  # repo bind there's no /app/package.json, and the seed logic must not run.)
+  dev-init:
+    profiles: ["dev"]
+    image: web-pi:local
+    user: "0:0"
+    entrypoint: ["chown", "-R", "1000:1000", "/app/node_modules"]
+    restart: "no"
+    volumes:
+      - webpi-dev-node-modules:/app/node_modules
+
+  dev:
+    profiles: ["dev"]
+    depends_on:
+      dev-init:
+        condition: service_completed_successfully
+    build:
+      context: .
+      args:
+        WEB_PI_BASE: ${WEB_PI_BASE:-/}
+    image: web-pi:local
+    # The repo is bind-mounted; node_modules is a *shadow* volume so the
+    # container builds its own native deps (node-pty) without touching the
+    # host's. npm install runs every boot — seconds when current, and it
+    # self-heals (e.g. after a NODE_ENV change) unlike a marker-file check.
+    command:
+      ["sh", "-c", "npm install --no-audit --no-fund; npm run dev:server & exec npm run dev -- --host --force"]
+    ports:
+      - "127.0.0.1:4321:4321" # astro dev (proxies /api,/ws,login to :3001 in-container)
+      - "127.0.0.1:3001:3001" # the API+WS half (npm run dev:server)
+    environment:
+      NODE_ENV: development # the image says production — npm would omit devDeps (tsc, @types/*)
+      ASTRO_TELEMETRY_DISABLED: "1"
+      WEB_PI_NEW_SESSION_CWD: /app
+    healthcheck:
+      disable: true # the prod image probes :3000; dev serves :4321/:3001
+    volumes:
+      # :z relabels the tree container_file_t on SELinux-enforcing hosts
+      # (no-op elsewhere) — without it container processes can't even stat
+      # files in a home-dir checkout.
+      - .:/app:z
+      - webpi-dev-node-modules:/app/node_modules # shadow: container-built native deps
+    # no restart policy: dev is an interactive foreground thing
+
+volumes:
+  # Explicit names (no project prefix) so the app volume stays stable across
+  # checkouts with different directory names.
+  webpi-app:
+    name: webpi-app
+  webpi-dev-node-modules:
+    name: webpi-dev-node-modules
