@@ -1,35 +1,34 @@
 ---
-// Base layout: html shell + global styles (no framework CSS).
-// Web Awesome default theme (layers + native styles + utilities + default
-// theme tokens). Astro bundles it with the page; import order vs console.css
-// is safe — Web Awesome styles live in cascade layers, console.css is
-// unlayered and always wins.
-import '@awesome.me/webawesome/dist/styles/webawesome.css';
+import "@awesome.me/webawesome/dist/styles/webawesome.css";
 
-interface Props { title: string }
+interface Props {
+  title: string;
+}
+
 const { title } = Astro.props;
 ---
+
 <!doctype html>
-<html lang="en" class="wa-theme-default wa-palette-default wa-brand-blue wa-dark">
+<html
+  lang="en"
+  class="wa-theme-default wa-palette-default wa-brand-blue wa-dark"
+>
   <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{title}</title>
-    <link rel="icon" href="data:,">
+    <link rel="icon" href="data:," />
   </head>
   <body>
     <slot />
   </body>
 </html>
-
-<script>
-  // Web Awesome SSR hydration: declarative-shadow-DOM polyfill + hydration
-  // support. Must run before any wa-* component is imported on the client,
-  // hence hoisted here in the shared layout ahead of page island scripts.
-  import '@awesome.me/astro-lit/dsd-polyfill.js';
-  import '@awesome.me/astro-lit/hydration-support.js';
-</script>
+<!-- No hydration script here: @awesome.me/astro-lit's support modules
+     must run BEFORE component modules define, and a layout-level script
+     has no execution-order guarantee vs page/component scripts. Each
+     client <script> that imports wa-* components imports them itself
+     (login.astro, ConsoleApp.astro, AgentTerminal.astro). -->
 
 <style is:global>
-  @import '../styles/console.css';
+  @import "../styles/console.css";
 </style>

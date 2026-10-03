@@ -11,16 +11,16 @@ const FIXTURE_A = '11111111-1111-1111-1111-111111111111';
 /** Terminal sizing invariants, evaluated in the page:
  *  - the app shell is viewport-locked: the terminal never makes the page
  *    taller than the viewport (no page scrollbar);
- *  - the rendered rows fill .term-box (the xterm screen reaches the bottom
+ *  - the rendered rows fill .terminal-container (the xterm screen reaches the bottom
  *    of the box within one cell row) — i.e. the terminal tracks the
  *    available space, not its own previously rendered size. */
 async function waitForTerminalFitted(page: Page, timeout = 5000): Promise<void> {
   await page.waitForFunction(() => {
     const el = document.querySelector('agent-terminal');
-    const box = document.querySelector('agent-terminal .term-box');
-    const screen = document.querySelector('agent-terminal .term-box .xterm-screen');
+    const box = document.querySelector('agent-terminal .terminal-container');
+    const screen = document.querySelector('agent-terminal .terminal-container .xterm-screen');
     if (!el || !box || !screen) return false;
-    const rows = (el as unknown as { term?: { rows: number } }).term?.rows ?? 0;
+    const rows = (el as unknown as { terminal?: { rows: number } }).terminal?.rows ?? 0;
     if (rows <= 0) return false;
     const b = box.getBoundingClientRect();
     const s = screen.getBoundingClientRect();
@@ -32,8 +32,8 @@ async function waitForTerminalFitted(page: Page, timeout = 5000): Promise<void> 
 
 async function termRows(page: Page): Promise<number> {
   return page.evaluate(() =>
-    (document.querySelector('agent-terminal') as unknown as { term: { rows: number } })
-      .term.rows);
+    (document.querySelector('agent-terminal') as unknown as { terminal: { rows: number } })
+      .terminal.rows);
 }
 
 async function login(page: Page): Promise<void> {
@@ -69,7 +69,7 @@ test('bad credentials show the danger callout', async ({ page }) => {
 test('login lands on the console with fixture sessions in the sidebar', async ({ page }) => {
   await login(page);
   await expect(page.locator('console-app wa-page')).toHaveCount(1);
-  await expect(page.locator('agent-terminal .term-box .xterm')).toHaveCount(1);
+  await expect(page.locator('agent-terminal .terminal-container .xterm')).toHaveCount(1);
 
   const nav = page.locator('session-sidebar .nav');
   await expect(nav).toContainText('fix the login bug in auth module');
@@ -87,9 +87,9 @@ test('new session: created, attached, terminal round-trips input', async ({ page
   await expect(page.locator('session-sidebar li[data-live="itest-live"]')).toHaveCount(1);
 
   // WS attach → tmux → banner from the session command appears in xterm.
-  const term = page.locator('agent-terminal .term-box');
+  const term = page.locator('agent-terminal .terminal-container');
   await expect(term).toContainText(MARKER, { timeout: 20_000 });
-  await expect(page.locator('.term-status.ok')).toContainText('attached');
+  await expect(page.locator('.terminal-status.ok')).toContainText('attached');
 
   // Full loop: keystrokes in xterm → WS → pty → tmux → output rendered.
   // $((41+1)) distinguishes the shell's evaluated output (TYPIST_42) from
@@ -102,8 +102,8 @@ test('new session: created, attached, terminal round-trips input', async ({ page
 test('resume a past session from the sidebar', async ({ page }) => {
   await login(page);
   await page.click(`session-sidebar li[data-resume="${FIXTURE_A}"]`);
-  await expect(page.locator('.term-status.ok')).toContainText('attached', { timeout: 20_000 });
-  await expect(page.locator('agent-terminal .term-box')).toContainText(MARKER);
+  await expect(page.locator('.terminal-status.ok')).toContainText('attached', { timeout: 20_000 });
+  await expect(page.locator('agent-terminal .terminal-container')).toContainText(MARKER);
 });
 
 test('terminal fills the available space and refits when it shrinks', async ({ page }) => {
@@ -112,7 +112,7 @@ test('terminal fills the available space and refits when it shrinks', async ({ p
   // Attach so the status bar is in its final state before measuring.
   await page.fill('wa-input#new-name input', 'itest-fill');
   await page.click('wa-button#new-btn');
-  await expect(page.locator('.term-status.ok')).toContainText('attached', { timeout: 20_000 });
+  await expect(page.locator('.terminal-status.ok')).toContainText('attached', { timeout: 20_000 });
 
   // At load the terminal must fill the viewport-height box without
   // pushing the page past the viewport.

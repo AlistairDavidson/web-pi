@@ -1,0 +1,36 @@
+---
+// ConsoleApp.astro — SSRs the console app shell: <wa-page> (sidebar +
+// free mobile drawer), header, <session-sidebar> slot, terminal, toasts.
+// console-app.ts (imported client-side below) upgrades <console-app> and
+// orchestrates it. Frontmatter imports SSR the wa-* components in this
+// markup (astro-lit, declarative shadow DOM); they do NOT register in the
+// browser — console-app.ts re-imports them there (AGENTS.md: SSR ≠ client).
+import '@awesome.me/webawesome/dist/components/page/page.js';
+import '@awesome.me/webawesome/dist/components/button/button.js';
+import '@awesome.me/webawesome/dist/components/icon/icon.js';
+import '@awesome.me/webawesome/dist/components/toast/toast.js';
+import AgentTerminal from '../AgentTerminal/AgentTerminal.astro';
+---
+<console-app>
+  <wa-page>
+    <header slot="navigation-header" class="nav-header wa-split">
+      <h1><wa-icon name="terminal"></wa-icon> web-pi</h1>
+      <wa-button id="logout" appearance="plain" size="s">
+        <wa-icon slot="start" name="right-from-bracket"></wa-icon>
+        sign out
+      </wa-button>
+    </header>
+    <session-sidebar slot="navigation"></session-sidebar>
+    <main><AgentTerminal /></main>
+  </wa-page>
+  <wa-toast placement="bottom-start"></wa-toast>
+</console-app>
+
+<script>
+  // MUST come first, before any wa-* component import — see
+  // @awesome.me/astro-lit README: if these run after components define,
+  // SSR'd elements render twice (DSD copy + fresh Lit render).
+  import '@awesome.me/astro-lit/dsd-polyfill.js';
+  import '@awesome.me/astro-lit/hydration-support.js';
+  import './console-app.ts';
+</script>

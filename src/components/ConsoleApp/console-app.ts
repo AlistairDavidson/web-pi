@@ -1,13 +1,15 @@
 // console-app.ts — <console-app>: orchestrates sidebar ↔ terminal on a
 // <wa-page> app shell (sidebar + free mobile drawer), state polling,
-// logout, toasts. Top-level island wired in index.astro.
-import type { ConsoleState } from '../lib/types';
-import { BASE } from '../base';
+// logout, toasts. Shell markup is SSR'd by ConsoleApp.astro; this module
+// registers <console-app> client-side and drives it.
+import type { ConsoleState } from '../../lib/types';
+import { BASE } from '../../base';
 import '@awesome.me/webawesome/dist/components/page/page.js';
 import '@awesome.me/webawesome/dist/components/button/button.js';
+import '@awesome.me/webawesome/dist/components/icon/icon.js';
 import '@awesome.me/webawesome/dist/components/toast/toast.js';
-import './agent-terminal';
-import './session-sidebar';
+import '../AgentTerminal/agent-terminal';
+import '../session-sidebar';
 
 /** Minimal typing for <wa-toast>.create(). */
 type WaToast = HTMLElement & {
@@ -19,22 +21,8 @@ export class ConsoleApp extends HTMLElement {
   private activeKey: string | null = null;
 
   connectedCallback(): void {
-    this.innerHTML = `
-      <wa-page>
-        <header slot="navigation-header" class="nav-header wa-split">
-          <h1><wa-icon name="terminal"></wa-icon> web-pi</h1>
-          <wa-button id="logout" appearance="plain" size="s">
-            <wa-icon slot="start" name="right-from-bracket"></wa-icon>
-            sign out
-          </wa-button>
-        </header>
-        <session-sidebar slot="navigation"></session-sidebar>
-        <main><agent-terminal></agent-terminal></main>
-      </wa-page>
-      <wa-toast placement="bottom-start"></wa-toast>`;
-
     const term = this.querySelector('agent-terminal') as
-      import('./agent-terminal').AgentTerminal & HTMLElement;
+      import('../AgentTerminal/agent-terminal').AgentTerminal & HTMLElement;
 
     this.addEventListener('attach-live', e => {
       const name = (e as CustomEvent<string>).detail;
@@ -66,7 +54,7 @@ export class ConsoleApp extends HTMLElement {
       await this.loadState();
       term.attach('live', out.name, this.activeKey);
     });
-    this.addEventListener('term-closed', () => this.loadState());
+    this.addEventListener('terminal-closed', () => this.loadState());
     (this.querySelector('#logout') as HTMLElement).onclick = async () => {
       await fetch(`${BASE}/logout`, { method: 'POST' });
       location.href = `${BASE}/login`;
@@ -87,7 +75,7 @@ export class ConsoleApp extends HTMLElement {
     if (!r.ok) return;
     const st = await r.json() as ConsoleState;
     const sidebar = this.querySelector('session-sidebar');
-    if (sidebar) (sidebar as import('./session-sidebar').SessionSidebar).render(st, this.activeKey);
+    if (sidebar) (sidebar as import('../session-sidebar').SessionSidebar).render(st, this.activeKey);
   }
 }
 

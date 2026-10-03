@@ -31,6 +31,11 @@ import '@awesome.me/webawesome/dist/components/icon/icon.js';
 </Base>
 
 <script>
+  // Support modules MUST precede the wa-* imports — if the SSR'd elements
+  // define before lit hydration support installs, they render twice
+  // (@awesome.me/astro-lit README). Not script-position-dependent.
+  import '@awesome.me/astro-lit/dsd-polyfill.js';
+  import '@awesome.me/astro-lit/hydration-support.js';
   // Client-side: define the SSR'd wa-* components (upgrade + hydrate).
   import '@awesome.me/webawesome/dist/components/card/card.js';
   import '@awesome.me/webawesome/dist/components/input/input.js';

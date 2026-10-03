@@ -26,8 +26,13 @@ end-to-end testing.
 
 **Rule:** every SSR'd `wa-*` component must *also* be imported in a
 client-side `<script>` (see `src/pages/login.astro` for both halves, and
-`src/components/console-app.ts` for the client-rendered pattern where one
-import serves both). After adding a `wa-*` element to a page, verify it
+`src/components/ConsoleApp/ConsoleApp.astro` + `console-app.ts` for the
+same split inside an Astro component wrapper). The client script must
+import `@awesome.me/astro-lit/dsd-polyfill.js` and
+`hydration-support.js` **before** any wa-* module — if the SSR'd element
+defines first, Lit renders a second copy next to the declarative-shadow-
+DOM content (everything appears twice; layout doubles in height). After
+adding a `wa-*` element to a page, verify it
 upgrades in a real browser (headless Chromium via the playwright install in
 `~/projects/validation-enhancer` works), not just in the SSR HTML.
 
@@ -42,6 +47,6 @@ upgrades in a real browser (headless Chromium via the playwright install in
 - The session sidebar re-renders via `innerHTML` on a 15s poll — preserve
   transient state (e.g. input value/focus) in `render()`, and don't put
   stateful components (e.g. `wa-details`) in it.
-- `agent-terminal` sizes itself with a `ResizeObserver` on `.term-box`; new
+- `agent-terminal` sizes itself with a `ResizeObserver` on `.terminal-container`; new
   layout around it must keep the box able to resize for any reason, not just
   window resizes.

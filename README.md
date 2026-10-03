@@ -55,6 +55,23 @@ cookie is `Secure` and login POSTs shouldn't cross plain HTTP. See
 `deploy/` for a systemd unit, an nginx reverse-proxy block with WebSocket
 upgrade, and a fail2ban jail for failed logins.
 
+## Developing
+
+Two processes: `astro dev` serves the pages (HMR), but the REST API and
+the terminal WS live in the Node server, not in Astro. In dev the Vite
+server proxies `/api`, `/ws`, and login/logout POSTs to it:
+
+```sh
+npm run dev:server   # API + WS half on :3001 (compiles dist-server first)
+npm run dev          # astro dev on :4321, proxying to the dev API server
+```
+
+Everything works against the dev server as it does in production — real
+`auth.json` login, session listing, live attach — and page edits hot-reload.
+Override the proxy target with `WEB_PI_DEV_API` if you run the API half
+elsewhere. The login rate limit is in-memory: restart `dev:server` to clear
+it while iterating on the login page.
+
 ## Configuration (environment)
 
 Everything is env-configured; defaults suit a single-user Linux box running
@@ -73,6 +90,7 @@ Everything is env-configured; defaults suit a single-user Linux box running
 | `WEB_PI_AUTH_FILE` | `<app root>/auth.json` | credential file (0400) |
 | `WEB_PI_CLIENT_DIR` | `<app root>/dist/client` | Astro hashed assets |
 | `WEB_PI_ASTRO_ENTRY` | `<app root>/dist/server/entry.mjs` | Astro SSR handler |
+| `WEB_PI_DEV_API` | `http://127.0.0.1:3001` | dev only: where `astro dev` proxies `/api`, `/ws`, login/logout (the `npm run dev:server` process) |
 
 Run under a dedicated unprivileged user (the app spawns a terminal — treat
 it as a web shell by design). Don't run it as root, don't put a sudo-wielding
@@ -108,9 +126,12 @@ shape is recommended.
 ## Project shape
 
 - `src/pages`, `src/layouts` — Astro pages (login + app shell), SSR'd
-- `src/layouts/Base.astro` — Web Awesome default theme + SSR hydration scripts
+- `src/layouts/Base.astro` — Web Awesome default theme + global styles
+  (astro-lit hydration support is imported by each component script —
+  import order vs wa-* modules matters, see AGENTS.md)
 - `src/components` — web components: `<console-app>`, `<session-sidebar>`,
-  `<agent-terminal>` (xterm.js island)
+  `<agent-terminal>` (xterm.js island); each static shell is SSR'd by an
+  Astro wrapper (`ConsoleApp.astro`, `AgentTerminal.astro`)
 - `src/lib` — shared strict TS: auth (scrypt + sessions + rate limiter),
   tmux helpers, pi session-store parser, wire types
 - `server` — the Node server: Astro SSR (middleware) + assets + REST + WS → node-pty → tmux

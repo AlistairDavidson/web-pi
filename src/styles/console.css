@@ -41,7 +41,7 @@ console-app wa-page::part(navigation-header) {
 console-app wa-page::part(base) { height: 100%; min-height: 0; }
 /* body's align-items:start would leave main start-aligned and content-
    sized; stretch it into its minmax(0, 1fr) track so the chain below is
-   height-definite all the way to .term-box. */
+   height-definite all the way to .terminal-container. */
 console-app wa-page::part(main) { align-self: stretch; }
 console-app main {
   display: flex; flex-direction: column; min-width: 0; height: 100%;
@@ -111,19 +111,19 @@ agent-terminal {
   flex: 1; display: flex; flex-direction: column;
   min-width: 0; min-height: 0; padding: var(--wa-space-xs);
 }
-agent-terminal .term-box { flex: 1; min-height: 0; }
-agent-terminal .term-box .xterm { height: 100%; }
-agent-terminal .term-status {
+agent-terminal .terminal-container { flex: 1; min-height: 0; }
+agent-terminal .terminal-container .xterm { height: 100%; }
+agent-terminal .terminal-status {
   display: flex; align-items: center; gap: var(--wa-space-2xs);
   color: var(--wa-color-text-quiet); font-size: var(--wa-font-size-2xs);
   padding: var(--wa-space-2xs) var(--wa-space-2xs) 0;
   border-top: var(--wa-border-width-s) solid var(--wa-color-surface-border);
   margin-top: var(--wa-space-2xs);
 }
-agent-terminal .term-status wa-spinner,
-agent-terminal .term-status wa-icon { font-size: var(--wa-font-size-2xs); flex: none; }
-agent-terminal .term-status.ok wa-icon { color: var(--wa-color-success-fill-normal); }
-agent-terminal .term-status.err wa-icon { color: var(--wa-color-danger-fill-normal); }
+agent-terminal .terminal-status wa-spinner,
+agent-terminal .terminal-status wa-icon { font-size: var(--wa-font-size-2xs); flex: none; }
+agent-terminal .terminal-status.ok wa-icon { color: var(--wa-color-success-fill-normal); }
+agent-terminal .terminal-status.err wa-icon { color: var(--wa-color-danger-fill-normal); }
 
 /* ---- login ---- */
 .login-main {
