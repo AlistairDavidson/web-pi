@@ -13,6 +13,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import * as pty from 'node-pty';
 import { Auth, RateLimiter, type Auth as AuthType } from '../src/lib/auth';
 import { listSessions, findSession } from '../src/lib/sessions';
+import { HiddenSessions, SESSION_ID_RE } from '../src/lib/hidden-sessions';
 import * as tmux from '../src/lib/tmux';
 import { ENV, RAW_ENV, APP_ROOT, PI_BIN, PI_AGENT_DIR, PI_SESSION_DIR } from '../src/lib/env';
 import * as jobs from '../src/lib/jobs';
@@ -101,6 +102,9 @@ if (PI_SESSION_DIR) {
 const route = (p: string): string => (CFG.base === '/' ? p : CFG.base + p);
 
 const auth: AuthType = new Auth(CFG.authFile);
+// Hide-from-list state for past sessions; ids in a JSON file next to the
+// auth file (WEB_PI_HIDDEN_FILE to move). pi's session store is untouched.
+const hiddenSessions = new HiddenSessions(CFG.authFile);
 const loginLimiter = new RateLimiter(10, 15 * 60 * 1000);
 const wsLimiter = new RateLimiter(30, 60 * 1000);
 
@@ -240,7 +244,9 @@ const server = http.createServer((req, res) => {
     tmux.listSessions((err, live) => {
       const state: ConsoleState = {
         me: 'ok', configured: auth.configured(),
-        live: err ? [] : live, sessions: sessList,
+        live: err ? [] : live,
+        sessions: sessList.map(s => ({ ...s, hidden: hiddenSessions.has(s.id) })),
+        hiddenCount: hiddenSessions.size,
       };
       sendJSON(res, 200, state);
     });
@@ -304,6 +310,35 @@ const server = http.createServer((req, res) => {
       return;
     }
     send(res, 404, 'not found');
+    return;
+  }
+
+  // Hide / unhide past sessions (sidebar 'delete' — reversible by design:
+  // ids land in the hidden-sessions state file, never pi's store).
+  if (req.method === 'POST' && url === route('/api/session/hide')) {
+    readBody(req, (err, body) => {
+      if (err) { send(res, 400, 'bad request'); return; }
+      const id = typeof body?.id === 'string' ? body.id : '';
+      if (!SESSION_ID_RE.test(id)) { send(res, 400, 'invalid session id'); return; }
+      const saveErr = hiddenSessions.hide(id);
+      if (saveErr) { sendJSON(res, 500, { error: 'could not save hidden state' }); return; }
+      sendJSON(res, 200, { ok: true });
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && url === route('/api/session/unhide')) {
+    readBody(req, (err, body) => {
+      if (err) { send(res, 400, 'bad request'); return; }
+      const saveErr = body?.all === true
+        ? hiddenSessions.unhideAll()
+        : typeof body?.id === 'string' && SESSION_ID_RE.test(body.id)
+          ? hiddenSessions.unhide(body.id)
+          : new Error('invalid session id');
+      if (!saveErr) { sendJSON(res, 200, { ok: true }); return; }
+      if (saveErr.message === 'invalid session id') { send(res, 400, 'invalid session id'); return; }
+      sendJSON(res, 500, { error: 'could not save hidden state' });
+    });
     return;
   }
 

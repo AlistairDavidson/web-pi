@@ -9,6 +9,8 @@ export interface PastSession {
   mtime: number;
   timestamp: string;
   cwd: string;
+  /** hidden from the sidebar list (hide ≠ delete: reversible, file kept) */
+  hidden?: boolean;
 }
 
 export interface LiveSession {
@@ -25,6 +27,9 @@ export interface ConsoleState {
   configured: boolean;
   live: LiveSession[];
   sessions: PastSession[];
+  /** total ids in the hidden-sessions state file (may exceed the
+   *  hidden ones inside `sessions`, which is capped like the list) */
+  hiddenCount: number;
 }
 
 // ---- scheduled jobs (systemd user units — see src/lib/jobs.ts) ----

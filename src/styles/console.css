@@ -75,6 +75,17 @@ session-sidebar {
   letter-spacing: .08em; color: var(--wa-color-text-quiet);
   margin: var(--wa-space-s) var(--wa-space-s) var(--wa-space-2xs);
 }
+.session-search {
+  display: block;
+  margin: 0 var(--wa-space-s) var(--wa-space-2xs);
+}
+.manage-hidden {
+  display: block;
+  margin: 0 var(--wa-space-s) var(--wa-space-2xs);
+  color: var(--wa-color-text-quiet);
+  font-size: var(--wa-font-size-2xs);
+}
+.manage-hidden::part(base) { justify-content: flex-start; }
 .nav ul { list-style: none; margin: 0; padding: 0; }
 .nav li {
   padding: var(--wa-space-2xs) var(--wa-space-s); cursor: pointer;
@@ -98,6 +109,22 @@ session-sidebar {
   display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   margin-block-start: var(--wa-space-3xs);
 }
+.nav li[data-resume] { display: flex; align-items: flex-start; gap: var(--wa-space-3xs); }
+.nav li[data-resume] .row-main { flex: 1; min-width: 0; }
+.nav li .hide-btn {
+  flex: none; align-self: center; color: var(--wa-color-text-quiet);
+}
+.nav li .hide-btn::part(button) {
+  min-width: var(--wa-space-l); /* stays clickable even if the icon asset fails */
+}
+.nav li .hide-btn:hover, .nav li .hide-btn:focus-visible {
+  color: var(--wa-color-danger-fill-normal);
+}
+.nav li.empty {
+  cursor: default; color: var(--wa-color-text-quiet);
+  font-size: var(--wa-font-size-2xs);
+}
+.nav li.empty:hover { background: none; }
 .nav li.group {
   display: flex; align-items: center; gap: var(--wa-space-2xs);
   color: var(--wa-color-text-quiet); font-size: var(--wa-font-size-2xs);
@@ -105,6 +132,32 @@ session-sidebar {
 }
 .nav li.group:hover { background: none; }
 .nav li.group wa-icon { font-size: var(--wa-font-size-2xs); flex: none; }
+
+/* ---- console-app dialogs (hide confirm + manage hidden) ---- */
+console-app .dialog-text { margin: 0 0 var(--wa-space-2xs); }
+console-app .dialog-note {
+  margin: 0; color: var(--wa-color-text-quiet);
+  font-size: var(--wa-font-size-s);
+}
+console-app .hidden-list {
+  display: flex; flex-direction: column; gap: var(--wa-space-2xs);
+  min-width: 0;
+}
+console-app .hidden-row {
+  display: flex; align-items: center; gap: var(--wa-space-2xs);
+  padding-block-end: var(--wa-space-2xs);
+  border-bottom: var(--wa-border-width-s) solid var(--wa-color-surface-border);
+}
+console-app .hidden-row:last-of-type { border-bottom: none; padding-block-end: 0; }
+console-app .hidden-meta { flex: 1; min-width: 0; }
+console-app .hidden-meta .t-name {
+  display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+console-app .hidden-meta .d {
+  display: block; color: var(--wa-color-text-quiet);
+  font-size: var(--wa-font-size-2xs); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
 
 /* ---- agent-terminal ---- */
 agent-terminal {
