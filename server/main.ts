@@ -109,6 +109,8 @@ const MIME: Record<string, string> = {
   '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
   '.woff2': 'font/woff2',
 };
 
@@ -199,10 +201,26 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // PWA files from public/ (service worker, manifest, icons): served with
+  // or without a session — the login page links the manifest and registers
+  // the worker before any auth can exist, and none of them carry data.
+  if (req.method === 'GET' && url.startsWith(CFG.base)) {
+    const rel = url.slice(CFG.base.length).replace(/^\//, '');
+    if (rel === 'sw.js' || rel === 'manifest.webmanifest' || rel.startsWith('icons/')) {
+      sendClientFile(res, '/' + rel, rel.startsWith('icons/'));
+      return;
+    }
+  }
+
   // Everything below requires a valid session...
   if (!authed(req)) {
     // ...except the login page + its hashed assets (every data/terminal
-    // route stays 401).
+    // route stays 401), and the PWA offline shell (static, session-free —
+    // the service worker precaches it at install time, pre-auth).
+    if (req.method === 'GET' && url === route('/offline')) {
+      renderAstro(req, res);
+      return;
+    }
     if (req.method === 'GET' && (url === CFG.base || url === CFG.base + '/' || url === route('/login'))) {
       req.url = route('/login'); // render the login page whatever the shell URL
       renderAstro(req, res);

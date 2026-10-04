@@ -81,6 +81,12 @@ test('unauthenticated / serves the login page with upgraded wa-* controls', asyn
   await expect(page.locator('wa-input#username input')).toHaveCount(1);
   await expect(page.locator('wa-input#password input[type=password]')).toHaveCount(1);
   await expect(page.locator('wa-button:has-text("sign in")')).toHaveCount(1);
+  // The layout's SSR'd <wa-toast> must also upgrade client-side (AGENTS.md:
+  // SSR ≠ client) — its create() only exists after the component defines.
+  await page.waitForFunction(() => {
+    const t = document.querySelector('wa-toast');
+    return !!t && typeof (t as HTMLElement & { create?: unknown }).create === 'function';
+  });
 });
 
 test('API routes stay guarded without a session', async ({ request }) => {

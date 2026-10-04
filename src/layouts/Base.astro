@@ -1,11 +1,15 @@
 ---
 import "@awesome.me/webawesome/dist/styles/webawesome.css";
+import "@awesome.me/webawesome/dist/components/toast/toast.js";
+import { BASE } from "../base";
 
 interface Props {
   title: string;
 }
 
 const { title } = Astro.props;
+// Mirrors --wa-color-surface-default
+const THEME_COLOR = "#11131a";
 ---
 
 <!doctype html>
@@ -17,17 +21,115 @@ const { title } = Astro.props;
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{title}</title>
-    <link rel="icon" href="data:," />
+    <link rel="icon" href={`${BASE}/icons/icon.svg`} type="image/svg+xml" />
+    <link
+      rel="icon"
+      href={`${BASE}/icons/icon-192.png`}
+      type="image/png"
+      sizes="192x192"
+    />
+    <link rel="manifest" href={`${BASE}/manifest.webmanifest`} />
+    <meta name="theme-color" content={THEME_COLOR} />
+    <link rel="apple-touch-icon" href={`${BASE}/icons/icon-maskable-192.png`} />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta
+      name="apple-mobile-web-app-status-bar-style"
+      content="black-translucent"
+    />
+    <meta name="apple-mobile-web-app-title" content="web-pi" />
   </head>
   <body>
     <slot />
+    <!-- App-wide toast stack (update notifications from the script below). -->
+    <wa-toast placement="top-end"></wa-toast>
+    <script>
+      // Client halves of the SSR'd wa-* elements in this layout (AGENTS.md:
+      // SSR ≠ client). Support modules MUST precede the wa-* imports —
+      // ES module side-effect order guarantees the polyfill runs before
+      // any component module defines, regardless of chunking.
+      import "@awesome.me/astro-lit/dsd-polyfill.js";
+      import "@awesome.me/astro-lit/hydration-support.js";
+      import "@awesome.me/webawesome/dist/components/toast/toast.js";
+      import "@awesome.me/webawesome/dist/components/button/button.js";
+      import { BASE } from "../base";
+
+      // PWA: register the offline-shell service worker (public/sw.js).
+      // Secure contexts only — https, or loopback http which browsers
+      // treat as secure.
+      if ("serviceWorker" in navigator && window.isSecureContext) {
+        let hadController = Boolean(navigator.serviceWorker.controller);
+        let announced = false;
+
+        // A new worker took this page over — a deploy, picked up by a
+        // navigation or the hourly check below. The FIRST install also
+        // claims the page (sw.js skipWaiting + clients.claim); that's not
+        // an update, so no toast for it.
+        navigator.serviceWorker.addEventListener("controllerchange", () => {
+          if (!hadController) {
+            hadController = true;
+            return;
+          }
+          if (announced) return;
+          announced = true;
+          const toast = document.querySelector("wa-toast");
+          if (!toast || typeof toast.create !== "function") return; // not upgraded
+          // duration 0: stays until dismissed. Terminal work must not be
+          // interrupted by an auto-reload; the button reloads on demand,
+          // and the next navigation applies the update anyway.
+          const item = toast.create("A new version of web-pi is ready.", {
+            duration: 0,
+            variant: "neutral",
+            icon: "arrows-rotate",
+          });
+          const reload = document.createElement("wa-button");
+          reload.size = "s";
+          reload.textContent = "Reload";
+          reload.addEventListener("click", () => location.reload());
+          item.append(" ", reload);
+        });
+
+        window.addEventListener("load", () => {
+          navigator.serviceWorker
+            .register(`${BASE}/sw.js`)
+            .then(async (reg) => {
+              // Warm the cache with what this page already loaded: assets
+              // fetched before the worker took control never crossed its
+              // fetch handler, so without this offline only works from the
+              // second visit on. The re-fetches hit the SW's cache, not the
+              // network.
+              const sw = navigator.serviceWorker;
+              if (!sw.controller) {
+                await new Promise((resolve) =>
+                  sw.addEventListener("controllerchange", resolve, {
+                    once: true,
+                  }),
+                );
+              }
+              for (const entry of performance.getEntriesByType("resource")) {
+                if (
+                  entry.name.includes("/_astro/") &&
+                  new URL(entry.name).origin === location.origin
+                ) {
+                  fetch(entry.name, { cache: "no-store" }).catch(() => {});
+                }
+              }
+              // Long-lived installed apps can go days without a navigation,
+              // and the browser only re-checks sw.js on its own every ~24h:
+              // poll hourly so deploys land without user action.
+              setInterval(() => reg.update().catch(() => {}), 60 * 60 * 1000);
+            })
+            .catch(() => {});
+        });
+      }
+    </script>
   </body>
 </html>
-<!-- No hydration script here: @awesome.me/astro-lit's support modules
-     must run BEFORE component modules define, and a layout-level script
-     has no execution-order guarantee vs page/component scripts. Each
-     client <script> that imports wa-* components imports them itself
-     (login.astro, ConsoleApp.astro, AgentTerminal.astro). -->
+<!-- This layout's client <script> imports wa-* components itself, with
+     the astro-lit support modules first — the same pattern as the page
+     and component scripts (login.astro, ConsoleApp.astro,
+     AgentTerminal.astro), so definition order is safe across all of
+     them. -->
 
 <style is:global>
   @import "../styles/console.css";

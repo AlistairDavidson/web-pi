@@ -137,3 +137,22 @@ agent-terminal .terminal-status.err wa-icon { color: var(--wa-color-danger-fill-
 }
 .login-card h1 wa-icon { color: var(--wa-color-brand-fill-normal); }
 .login-card wa-button { width: 100%; margin-block-start: var(--wa-space-2xs); }
+
+/* ---- offline (PWA shell served by the service worker) ---- */
+.offline-main {
+  min-height: 100dvh; justify-content: center; align-items: center;
+  padding: var(--wa-space-m);
+}
+.offline-card { width: 100%; max-width: 24rem; }
+.offline-card h1 {
+  display: flex; align-items: center; gap: var(--wa-space-2xs);
+  font-size: var(--wa-font-size-l); margin: 0 0 var(--wa-space-m);
+}
+.offline-card h1 .offline-glyph {
+  color: var(--wa-color-brand-fill-normal);
+  width: 1em; height: 1em; flex: none;
+}
+.offline-card p {
+  color: var(--wa-color-text-quiet); margin: 0 0 var(--wa-space-m);
+}
+.offline-card wa-button { width: 100%; }
