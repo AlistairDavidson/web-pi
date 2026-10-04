@@ -21,10 +21,6 @@ new app button
 
 delete app button
 
-session management tools
-session search
-delete session
-
 self-naming sessions
 
 Zed editor as a webapp

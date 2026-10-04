@@ -4,10 +4,12 @@
 // (xterm → WS → node-pty → tmux → back).
 // Runs serially (workers: 1) — see playwright.config.ts.
 import { execFileSync } from 'node:child_process';
+import * as fs from 'node:fs';
 import { expect, test, type Page } from '@playwright/test';
-import { MARKER, PASSWORD, TMUX_SOCKET, USERNAME } from './env';
+import { MARKER, PASSWORD, TMUX_SOCKET, USERNAME, WORKSPACE } from './env';
 
 const FIXTURE_A = '11111111-1111-1111-1111-111111111111';
+const FIXTURE_B = '22222222-2222-2222-2222-222222222222';
 
 /** Terminal sizing invariants, evaluated in the page:
  *  - the app shell is viewport-locked: the terminal never makes the page
@@ -91,6 +93,8 @@ test('unauthenticated / serves the login page with upgraded wa-* controls', asyn
 
 test('API routes stay guarded without a session', async ({ request }) => {
   expect((await request.get('/api/state')).status()).toBe(401);
+  expect((await request.post('/api/session/hide', { data: { id: FIXTURE_A } })).status()).toBe(401);
+  expect((await request.post('/api/session/unhide', { data: { id: FIXTURE_A } })).status()).toBe(401);
 });
 
 test('bad credentials show the danger callout', async ({ page }) => {
@@ -237,6 +241,104 @@ test('jobs page degrades to a notice when systemctl --user is absent', async ({ 
   expect(create.status()).toBe(503);
   expect((await page.request.post('/api/jobs/itest-job/run')).status()).toBe(503);
   expect((await page.request.delete('/api/jobs/itest-job')).status()).toBe(503);
+});
+
+test('hide: session leaves the sidebar, manage dialog restores it', async ({ page }) => {
+  await login(page);
+  const row = page.locator(`session-sidebar li[data-resume="${FIXTURE_B}"]`);
+  await expect(row).toContainText('refactor the tmux helpers');
+
+  // The row action asks for confirmation before hiding.
+  await row.locator('wa-button[data-hide]').click();
+  const confirm = page.locator('wa-dialog#confirm-hide');
+  await expect(confirm.locator('#confirm-hide-title')).toContainText('refactor the tmux helpers');
+  await confirm.locator('wa-button#confirm-hide-ok').click();
+
+  await expect(page.locator(`session-sidebar li[data-resume="${FIXTURE_B}"]`)).toHaveCount(0);
+  await expect(page.locator('session-sidebar #session-list')).not.toContainText('refactor the tmux helpers');
+
+  // "N hidden — manage" appears; the dialog (outside the poll-rendered
+  // sidebar) lists the hidden session and unhides it.
+  await expect(page.locator('session-sidebar wa-button#manage-hidden')).toContainText('1 hidden');
+  await page.click('session-sidebar wa-button#manage-hidden');
+  const dialog = page.locator('wa-dialog#hidden-dialog');
+  await expect(dialog.locator('.hidden-row .t-name')).toContainText('refactor the tmux helpers');
+  await dialog.locator('wa-button[data-unhide]').click();
+  await expect(page.locator(`session-sidebar li[data-resume="${FIXTURE_B}"]`)).toHaveCount(1);
+  await expect(page.locator('session-sidebar wa-button#manage-hidden')).toHaveCount(0);
+});
+
+test('hide persists across reload in the server-side state file', async ({ page }) => {
+  await login(page);
+  await page.locator(`session-sidebar li[data-resume="${FIXTURE_B}"] wa-button[data-hide]`).click();
+  await page.locator('wa-dialog#confirm-hide wa-button#confirm-hide-ok').click();
+  await expect(page.locator(`session-sidebar li[data-resume="${FIXTURE_B}"]`)).toHaveCount(0);
+
+  await page.reload();
+  await page.waitForSelector('session-sidebar .nav');
+  await expect(page.locator(`session-sidebar li[data-resume="${FIXTURE_B}"]`)).toHaveCount(0);
+  await expect(page.locator('session-sidebar wa-button#manage-hidden')).toContainText('1 hidden');
+
+  // The state file next to the auth file carries the id (hide ≠ delete:
+  // the fixture session file is untouched).
+  const state = JSON.parse(fs.readFileSync(`${WORKSPACE}/hidden-sessions.json`, 'utf8')) as { hidden: string[] };
+  expect(state.hidden).toContain(FIXTURE_B);
+  expect(fs.existsSync(`${WORKSPACE}/sessions/alpha/2026-10-02T10-00-00_${FIXTURE_B}.jsonl`)).toBe(true);
+
+  // Tidy via unhide-all so later tests see a clean list.
+  await page.click('session-sidebar wa-button#manage-hidden');
+  await page.locator('wa-dialog#hidden-dialog wa-button#unhide-all').click();
+  await expect(page.locator(`session-sidebar li[data-resume="${FIXTURE_B}"]`)).toHaveCount(1);
+});
+
+test('search filters the past-session list and survives the poll re-render', async ({ page }) => {
+  await login(page);
+  const search = page.locator('wa-input#session-search input');
+
+  // Title match: one row, one cwd group, count badge follows.
+  await search.fill('login bug');
+  await expect(page.locator('session-sidebar li[data-resume]')).toHaveCount(1);
+  await expect(page.locator('session-sidebar li[data-resume]')).toContainText('fix the login bug');
+  await expect(page.locator('session-sidebar li.group')).toHaveCount(1);
+  await expect(page.locator('session-sidebar #sessions-count')).toHaveText('1');
+
+  // cwd match and the empty state.
+  await search.fill('/srv');
+  await expect(page.locator('session-sidebar li[data-resume]')).toHaveCount(1);
+  await expect(page.locator('session-sidebar li[data-resume]')).toContainText('deploy checklist review');
+  await search.fill('zzz-no-match');
+  await expect(page.locator('session-sidebar li.empty')).toContainText('no sessions match');
+
+  // Escape clears.
+  await search.press('Escape');
+  await expect(page.locator('session-sidebar li[data-resume]')).toHaveCount(3);
+
+  // A state poll re-render (the 15s interval, forced here) must not eat
+  // the search box: value, focus and caret are restored.
+  await search.fill('tmux');
+  await page.keyboard.press('ArrowLeft'); // caret mid-string, not at the end
+  const caretBefore = await page.evaluate(() => {
+    const wa = document.querySelector('#session-search') as HTMLElement & { shadowRoot: ShadowRoot | null };
+    return wa.shadowRoot?.querySelector('input')?.selectionStart ?? null;
+  });
+  expect(caretBefore).toBe(3);
+  await page.evaluate(() =>
+    (document.querySelector('console-app') as unknown as { loadState(): Promise<void> }).loadState());
+  await page.waitForFunction(() => {
+    const wa = document.querySelector('#session-search') as HTMLElement & { shadowRoot: ShadowRoot | null };
+    const native = wa.shadowRoot?.querySelector('input') ?? null;
+    // Focus inside an open shadow root retargets document.activeElement to
+    // the host, so accept either the host or the inner input being focused.
+    return native != null && native.value === 'tmux'
+      && (document.activeElement === wa || wa.shadowRoot?.activeElement === native);
+  });
+  const caretAfter = await page.evaluate(() => {
+    const wa = document.querySelector('#session-search') as HTMLElement & { shadowRoot: ShadowRoot | null };
+    return wa.shadowRoot?.querySelector('input')?.selectionStart ?? null;
+  });
+  expect(caretAfter).toBe(caretBefore);
+  // The filter is still applied after the re-render.
+  await expect(page.locator('session-sidebar li[data-resume]')).toHaveCount(1);
 });
 
 test('login rate limit kicks in (10 per 15 min per IP)', async ({ request }) => {

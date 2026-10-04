@@ -28,7 +28,10 @@ tmux socket ── session per tab ── pi ── ~/.pi/agent/sessions/
 - **Sessions** — past pi sessions parsed from pi's session store
   (`~/.pi/agent/sessions` by default), grouped by working directory, newest
   first. Click to resume: starts `pi --session <id>` at the session's
-  original cwd (pi appends — history is never destroyed).
+  original cwd (pi appends — history is never destroyed). Type in the
+  filter box to search titles/paths; hide a session to declutter the list —
+  hiding only records the id in a small server-side state file (never
+  touches pi's store) and is reversible via "N hidden — manage".
 - **Live** — running tmux sessions on the app's socket; click to attach
   (`attach -d`).
 - **Jobs** (`/jobs`) — scheduled commands ("cron") on systemd **user**
@@ -136,6 +139,7 @@ the vendored-pi probe) live beside the reads in `src/lib/env.ts`.
 | `WEB_PI_AUTH_FILE` | `<app root>/auth.json` | credential file (0400) |
 | `WEB_PI_SYSTEMCTL` | `systemctl` | binary used for scheduled jobs (override for tests/odd distros) |
 | `WEB_PI_SYSTEMD_ANALYZE` | `systemd-analyze` | binary used to validate OnCalendar specs |
+| `WEB_PI_HIDDEN_FILE` | `hidden-sessions.json` next to `WEB_PI_AUTH_FILE` | hide-from-list state for past sessions (ids only; session files are never deleted) |
 | `WEB_PI_CLIENT_DIR` | `<app root>/dist/client` | Astro hashed assets |
 | `WEB_PI_ASTRO_ENTRY` | `<app root>/dist/server/entry.mjs` | Astro SSR handler |
 | `WEB_PI_DEV_API` | `http://127.0.0.1:3001` | dev only: where `astro dev` proxies `/api`, `/ws`, login/logout (the `npm run dev:server` process) |
