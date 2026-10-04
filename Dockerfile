@@ -8,6 +8,9 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /repo
+# The image never runs playwright (e2e lives on the host, AGENTS.md) — skip
+# its postinstall browser download (~300MB of fetch per build).
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
@@ -27,10 +30,14 @@ RUN apt-get update \
 
 RUN mkdir /app && chown node:node /app
 
-COPY --from=build /repo /opt/web-pi
+# --chown sets ownership inside the COPY layer; a separate `chown -R`
+# after the fact copy-ups every file again (~470MB dead layer). The
+# entrypoint stays root-owned — exec needs only the mode bit — so the app
+# user can't rewrite its own bootstrap; the chmod guards contexts that
+# drop mode bits (e.g. Windows checkouts).
+COPY --chown=node:node --from=build /repo /opt/web-pi
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh \
- && chown -R node:node /opt/web-pi
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
 
 USER node
 WORKDIR /app
@@ -54,9 +61,14 @@ CMD ["node", "dist-server/server/main.js"]
 # Built with `--target dev` (compose's dev profile); the shadow node_modules
 # volume compiles node-pty here.
 FROM runtime AS dev
+# runtime dropped to USER node above; apt needs root. (This was broken —
+# plain `--target dev` builds inherited node and died in apt-get with
+# "Permission denied". Compose overrides the user per-service anyway.)
+USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential python3 \
  && rm -rf /var/lib/apt/lists/*
+USER node
 
 # ---------- prod: default (last) stage ----------
 FROM runtime AS prod

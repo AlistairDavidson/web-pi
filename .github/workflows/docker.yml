@@ -1,0 +1,73 @@
+# Build-validate the image on every change that can affect it — including
+# dependabot's base-image PRs (a NODE_VERSION bump is a *runtime* major for
+# the app; this is where it gets caught, not on the deploy host). No
+# registry push: web-pi deploys by building on the host (README
+# "Deploying"); CI only proves the image builds and boots.
+name: docker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - docker-entrypoint.sh
+      - compose.yaml
+      - package.json
+      - package-lock.json
+      - astro.config.mjs
+      - tsconfig.json
+      - tsconfig.server.json
+      - tmux.conf
+      - src/**
+      - server/**
+      - pi/**
+      - .github/workflows/docker.yml
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - docker-entrypoint.sh
+      - compose.yaml
+      - package.json
+      - package-lock.json
+      - astro.config.mjs
+      - tsconfig.json
+      - tsconfig.server.json
+      - tmux.conf
+      - src/**
+      - server/**
+      - pi/**
+      - .github/workflows/docker.yml
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # compose build exercises the real prod path (target prod) plus the
+      # dev toolchain target; dev-init shares dev's build — BuildKit
+      # dedupes it. Interpolates WEB_PI_BASE=/ like a plain host build.
+      - name: Build images (prod + dev targets)
+        run: docker compose --profile dev build
+
+      # Boots the prod service exactly as an operator would (named volume,
+      # first-boot seed, loopback publish) and probes the unauthenticated
+      # route the image healthcheck itself uses.
+      - name: Smoke test (boot + serve /login)
+        run: |
+          set -eu
+          docker compose up --detach
+          trap 'docker compose logs webpi || true; docker compose down --volumes' EXIT
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:3000/login >/dev/null; then
+              echo "served /login after ~${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::webpi never served /login within 60s"
+          exit 1

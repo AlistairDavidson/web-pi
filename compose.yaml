@@ -26,6 +26,15 @@ services:
         # Baked into the pages at build time AND needed at runtime — keep in sync.
         WEB_PI_BASE: ${WEB_PI_BASE:-/}
     image: web-pi:local
+    # tini as PID 1: the server installs no signal handlers and, as PID 1,
+    # the kernel ignores unhandled SIGTERM — without this every stop/
+    # restart burns the full 10s grace then SIGKILLs (tmux sessions with
+    # it). Also reaps reparented processes (daemonised tmux server).
+    init: true
+    # Block setuid/file-cap elevation inside the container — sessions must
+    # never climb to root-in-container (the first step of most escapes).
+    # node/npm/tmux/node-pty need none of it.
+    security_opt: ["no-new-privileges:true"]
     ports:
       - "127.0.0.1:3000:3000" # loopback publish; TLS reverse proxy in front (deploy/)
     environment:
@@ -41,6 +50,14 @@ services:
   # repo bind there's no /app/package.json, and the seed logic must not run.)
   dev-init:
     profiles: ["dev"]
+    # Own build (identical to dev's — BuildKit dedupes) so this service
+    # never tries to *pull* web-pi:local-dev on a cold machine or under
+    # partial invocations (compose --profile dev run dev-init).
+    build:
+      context: .
+      target: dev
+      args:
+        WEB_PI_BASE: ${WEB_PI_BASE:-/}
     image: web-pi:local-dev
     user: "0:0"
     entrypoint: ["sh", "-c", "chown -R ${UID:-1000}:${GID:-1000} /app/node_modules"]
@@ -62,6 +79,17 @@ services:
     # Match the container user to the host checkout's owner so bind-mounted
     # files (and .astro/, dist-server/ writes) aren't permission-fought.
     user: "${UID:-1000}:${GID:-1000}"
+    # Same two guards as webpi: prompt stop/restart, no in-container
+    # privilege elevation.
+    init: true
+    security_opt: ["no-new-privileges:true"]
+    # Neutralise the image's seed/sync entrypoint: /app is a bind mount of
+    # the host checkout, and the entrypoint's rm -rf/cp -a sync must never
+    # run against it. Today it's saved only by the host .git sentinel (the
+    # "operator-owned git checkout" branch) — a git-less bind target would
+    # get its top-level entries rm -rf'd and overwritten from the image.
+    # dev never wants seeding; WORKDIR /app already covers the cd.
+    entrypoint: []
     # The repo is bind-mounted; node_modules is a *shadow* volume so the
     # container builds its own native deps (node-pty) without touching the
     # host's. npm install runs every boot — seconds when current, and it

@@ -2,6 +2,8 @@ apps folder that contains git submodules
 
 settings page
 
+postgres container, move state files and auth to that
+
 update pi button, auto-update setting
 
 console is an app
@@ -76,8 +78,10 @@ tmux sessions die with container restarts (sidebar resume covers it) - accept + 
 
 wheel-scroll decision: tmux mouse on + pi tuiMode regular gives wheel-scrollback but loses fullscreen pi (tradeoff documented in tmux.conf)
 
+setup instructions / script for agents / actual scripts
+
 Human:
-make sidebar much nicer - rebuild step by step, maybe
+make sidebar much nicer - rebuild step by step
 Skills and other methods to enforce my coding patterns
 Write a refined agent workflow
 HIG skill
