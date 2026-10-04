@@ -1,11 +1,12 @@
 # pi/ — the controlled pi agent-dir template
 
-Everything in this directory is copied into the **runtime agent dir**
-(default `<app root>/.pi-agent`, or `WEB_PI_AGENT_DIR` / `PI_CODING_AGENT_DIR`)
-on every server boot — template files overwrite their runtime counterparts,
-so this repo is the source of truth for pi's config. Files only pi itself
-writes (`auth.json`, `sessions/`, caches, …) are never in the template and
-are left alone in the runtime dir.
+Everything in this directory is seeded into the **runtime agent dir**
+(default `<app root>/.pi-agent`, or `WEB_PI_AGENT_DIR`) at server boot,
+**only where the runtime dir doesn't already have the file** — existing
+files always win, so config pi itself writes (settings.json) or the
+operator customises is never clobbered, while template files added by
+upgrades still land. Files only pi itself writes (`auth.json`,
+`sessions/`, caches, …) are never in the template.
 
 Spawned pi sessions get `PI_CODING_AGENT_DIR=<runtime dir>` — they never
 read or write `~/.pi/agent`. Credentials therefore live per-install:

@@ -75,10 +75,17 @@ session listing, live attach — and pi sessions start in `/app` (the repo),
 self-modification included. Page edits hot-reload through the bind mount.
 
 Notes:
+- Dev runs as `${UID:-1000}:${GID:-1000}` so the container user matches
+  the host checkout's owner. Bash doesn't export `UID`/`GID` — `export
+  UID GID` first (or drop `UID=$(id -u)`/`GID=$(id -g)` lines in a `.env`
+  next to `compose.yaml`).
 - The repo bind uses the `:z` volume flag — required on SELinux-enforcing
   hosts (relabels the tree `container_file_t`), a no-op elsewhere.
 - Dev shares ports 3001/4321 with the host flow below — run one or the
   other, not both.
+- The dev profile builds the `dev` image target (`web-pi:local-dev`),
+  which carries `build-essential`/`python3` for the in-container
+  `node-pty` build; the prod image (`web-pi:local`) stays slim.
 
 **On the host** (no docker): two processes — `astro dev` serves the pages
 (HMR), but the REST API and the terminal WS live in the Node server, not in
@@ -105,7 +112,7 @@ Everything is env-configured; defaults suit a single-user Linux box running
 | `WEB_PI_PORT` | `3000` | Listen port |
 | `WEB_PI_BASE` | `/` | URL base path, e.g. `/console` when riding an existing site. **Baked into the pages at build time** — set it before `npm run build` *and* at runtime |
 | `WEB_PI_HOME` | `os.homedir()` | `HOME` for spawned processes (tmux, pi) |
-| `WEB_PI_AGENT_DIR` | `PI_CODING_AGENT_DIR`, else `<app root>/.pi-agent` | runtime pi agent dir (config, credentials, sessions for spawned pi) — seeded from the repo's `pi/` template at every boot |
+| `WEB_PI_AGENT_DIR` | `<app root>/.pi-agent` | runtime pi agent dir (config, credentials, sessions for spawned pi) — seeded from the repo's `pi/` template where absent (a stray `PI_CODING_AGENT_DIR` in the server's env is ignored with an error logged) |
 | `WEB_PI_SESSIONS_DIR` | `PI_CODING_AGENT_SESSION_DIR`, else `<agent dir>/sessions` | where to list past pi sessions from |
 | `WEB_PI_NEW_SESSION_CWD` | `$WEB_PI_HOME` | cwd for new sessions |
 | `WEB_PI_COMMAND` | `<app root>/node_modules/.bin/pi` (falls back to `pi` on PATH) | command run in a new session (whitespace-split; resume appends `--session <id>` — only pi-family CLIs support that) |
@@ -128,8 +135,10 @@ installed on the box. Its config is project-controlled too:
 - [`pi/`](pi/) in the repo is the **template** — settings, `mcp.json`,
   skills, extensions; whatever the install should ship to every session.
 - The **runtime agent dir** (default `<app root>/.pi-agent`, gitignored) is
-  seeded from it at every server boot: template files overwrite, state only
-  pi writes (`auth.json`, `sessions/`) is preserved.
+  seeded from it at server boot, **only where absent**: existing files always
+  win, so settings pi itself writes and operator edits are never clobbered,
+  while template files added by upgrades still land. State only pi writes
+  (`auth.json`, `sessions/`) is never in the template.
 - Spawned sessions run with `PI_CODING_AGENT_DIR=<runtime dir>` (delivered
   via `tmux new-session -e`, deterministic per session) — they never touch
   your `~/.pi/agent`, in either direction.

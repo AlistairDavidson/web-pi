@@ -1,12 +1,19 @@
 # web-pi — one image, two modes.
 #
-#   prod:  docker compose up -d             → loopback :3000, reverse-proxy TLS in front
-#   dev:   docker compose --profile dev up  → dev servers with the repo bind-mounted
+#   prod:  docker compose up -d                    → loopback :3000, reverse-proxy TLS in front
+#   dev:   docker compose --profile dev up dev     → dev servers with the repo bind-mounted
+#
+# Name the `dev` service (as above): services without profiles (webpi) start
+# on every `up`, so a bare `--profile dev up` would boot prod alongside.
 #
 # Both modes treat /app as the living project: prod seeds a named volume
 # from the image on first boot (never re-seeds); dev bind-mounts the host
 # checkout. pi is an npm dependency pinned by the lockfile — image rebuilds
 # are for toolchain/app changes; pi updates happen in place on the volume.
+#
+# Dev runs as ${UID:-1000}:${GID:-1000} so the container user matches the
+# host checkout's owner (bash doesn't export UID/GID — `export UID GID`
+# first, or put them in a .env next to this file).
 
 name: web-pi
 
@@ -14,6 +21,7 @@ services:
   webpi:
     build:
       context: .
+      target: prod # slim: no compiler toolchain (dev target has it)
       args:
         # Baked into the pages at build time AND needed at runtime — keep in sync.
         WEB_PI_BASE: ${WEB_PI_BASE:-/}
@@ -28,14 +36,14 @@ services:
     restart: unless-stopped
 
   # One-shot: empty named volumes are created root-owned; the dev service
-  # runs as uid 1000 and must write node_modules. Runs on every `up` — a
+  # runs as ${UID:-1000} and must write node_modules. Runs on every `up` — a
   # no-op chown once ownership is right. (Entrypoint overridden: without the
   # repo bind there's no /app/package.json, and the seed logic must not run.)
   dev-init:
     profiles: ["dev"]
-    image: web-pi:local
+    image: web-pi:local-dev
     user: "0:0"
-    entrypoint: ["chown", "-R", "1000:1000", "/app/node_modules"]
+    entrypoint: ["sh", "-c", "chown -R ${UID:-1000}:${GID:-1000} /app/node_modules"]
     restart: "no"
     volumes:
       - webpi-dev-node-modules:/app/node_modules
@@ -47,9 +55,13 @@ services:
         condition: service_completed_successfully
     build:
       context: .
+      target: dev # runtime + build-essential/python3: the container npm-installs node-pty
       args:
         WEB_PI_BASE: ${WEB_PI_BASE:-/}
-    image: web-pi:local
+    image: web-pi:local-dev
+    # Match the container user to the host checkout's owner so bind-mounted
+    # files (and .astro/, dist-server/ writes) aren't permission-fought.
+    user: "${UID:-1000}:${GID:-1000}"
     # The repo is bind-mounted; node_modules is a *shadow* volume so the
     # container builds its own native deps (node-pty) without touching the
     # host's. npm install runs every boot — seconds when current, and it
@@ -62,7 +74,10 @@ services:
     environment:
       NODE_ENV: development # the image says production — npm would omit devDeps (tsc, @types/*)
       ASTRO_TELEMETRY_DISABLED: "1"
+      WEB_PI_BASE: ${WEB_PI_BASE:-/} # same value the pages were built with
       WEB_PI_NEW_SESSION_CWD: /app
+      # A non-1000 uid has no passwd entry → HOME=/ → npm's cache is unwritable there
+      npm_config_cache: /tmp/.npm
     healthcheck:
       disable: true # the prod image probes :3000; dev serves :4321/:3001
     volumes:

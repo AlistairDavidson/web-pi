@@ -38,9 +38,14 @@ const piBin = path.join(appRoot, 'node_modules', '.bin', 'pi');
 // (settings.json, mcp.json, skills/, extensions/, …); the runtime agent dir
 // below is what spawned pi actually uses (PI_CODING_AGENT_DIR) — seeded
 // from the template at boot, so sessions never read or write ~/.pi/agent.
-const agentDir = process.env.WEB_PI_AGENT_DIR
-  ?? process.env.PI_CODING_AGENT_DIR
-  ?? path.join(appRoot, '.pi-agent');
+// NB: PI_CODING_AGENT_DIR in the *server's* environment is deliberately NOT
+// a fallback — on an operator's box that's their real agent dir, and seeding
+// it would overwrite their config.
+const agentDir = process.env.WEB_PI_AGENT_DIR ?? path.join(appRoot, '.pi-agent');
+if (process.env.PI_CODING_AGENT_DIR && !process.env.WEB_PI_AGENT_DIR) {
+  console.error(`PI_CODING_AGENT_DIR is set (${process.env.PI_CODING_AGENT_DIR}) — ignoring it; ` +
+    `web-pi uses its own runtime agent dir (${agentDir}). Set WEB_PI_AGENT_DIR to move it.`);
+}
 const agentTemplate = path.join(appRoot, 'pi');
 
 const CFG = {
@@ -64,16 +69,26 @@ const CFG = {
     .trim().split(/\s+/).filter(Boolean),
 };
 
-/** Seed the runtime agent dir from the versioned template: template files
- *  and dirs overwrite their runtime counterparts (the repo is the source of
- *  truth for config); state only pi writes (auth.json, sessions/, caches)
- *  isn't in the template and is left alone. */
+/** Seed the runtime agent dir from the versioned template, only where the
+ *  runtime dir doesn't already have the file: existing files always win, so
+ *  config pi itself writes (settings.json) or the operator customises is
+ *  never clobbered — the template is first-boot defaults, and template files
+ *  added by upgrades still land. State only pi writes (auth.json, sessions/,
+ *  caches, …) is never in the template and is left alone. */
 function seedAgentDir(): void {
   try {
     fs.mkdirSync(CFG.agentDir, { recursive: true });
     if (!fs.existsSync(agentTemplate)) return;
-    for (const entry of fs.readdirSync(agentTemplate)) {
-      fs.cpSync(path.join(agentTemplate, entry), path.join(CFG.agentDir, entry), { recursive: true });
+    const walk = (dir: string): string[] =>
+      fs.readdirSync(dir, { withFileTypes: true }).flatMap(e => {
+        const p = path.join(dir, e.name);
+        return e.isDirectory() ? walk(p) : [p];
+      });
+    for (const src of walk(agentTemplate)) {
+      const dst = path.join(CFG.agentDir, path.relative(agentTemplate, src));
+      if (fs.existsSync(dst)) continue;
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      fs.cpSync(src, dst);
     }
   } catch (err) {
     console.warn(`could not seed pi agent dir (${CFG.agentDir}):`, (err as Error).message);
