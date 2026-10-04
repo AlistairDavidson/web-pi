@@ -29,3 +29,19 @@ Layout mirrors pi's agent directory (`pi docs: configuration.md`):
 
 Project-level config (`.pi/` in a session's cwd) still applies on top of
 this, per pi's normal precedence — trust prompts included.
+
+## Shipping resources to every session
+
+- **MCP servers** — `mcp.json`:
+  `{"mcpServers": {"name": {"command": "…", "args": […]}}}` (pi docs:
+  mcp.md). Available in every web-pi session — only add servers whose
+  credentials you're happy exposing to everything a session can do.
+- **Skills** — `skills/<name>/SKILL.md` (+ supporting files), loaded by
+  every session.
+- **Extensions** — `extensions/*.js`, loaded as ES modules at startup.
+- **Prompt templates** — `prompts/<name>.md`, exposed as slash commands.
+
+The shipped `settings.json` sets `quietStartup: "header"` — trims pi's
+boot output to the header line, suited to a browser terminal. Because
+seeding is only-if-absent, tuning settings from inside a session
+(`/settings`) survives restarts.

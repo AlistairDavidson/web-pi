@@ -6,16 +6,29 @@
 // OWN socket + unit — never share this one, or a crashing supervised
 // session would leave its unit looking "active".
 import { execFile } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { LiveSession } from './types';
 
 export const SOCKET = process.env.WEB_PI_TMUX_SOCKET ?? 'web-pi';
 export const NAME_RE = /^[a-zA-Z0-9_-]{1,40}$/;
 
+// In-project tmux config, applied when the tmux server starts. `-f` is read
+// at server start only; carrying it on every call is a no-op afterwards and
+// guarantees whichever call boots the server (first new-session) uses it.
+// dist-server/src/lib/tmux.js → app root is three levels up.
+const CONF = process.env.WEB_PI_TMUX_CONF
+  ?? path.join(__dirname, '..', '..', '..', 'tmux.conf');
+if (process.env.WEB_PI_TMUX_CONF && !fs.existsSync(CONF)) {
+  console.warn(`WEB_PI_TMUX_CONF=${CONF} does not exist — using tmux defaults`);
+}
+
 type Cb<T> = (err: Error | null, out: T) => void;
 
 function tmux(socket: string, args: string[], cb: (err: Error | null, stdout: string) => void,
   env?: Record<string, string>): void {
-  execFile('tmux', ['-L', socket, ...args],
+  const conf = fs.existsSync(CONF) ? ['-f', CONF] : [];
+  execFile('tmux', [...conf, '-L', socket, ...args],
     { timeout: 5000, ...(env ? { env: Object.assign({}, process.env, env) } : {}) },
     (err, stdout) => {
       cb(err instanceof Error ? err : null, typeof stdout === 'string' ? stdout : '');

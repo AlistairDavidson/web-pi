@@ -117,6 +117,7 @@ Everything is env-configured; defaults suit a single-user Linux box running
 | `WEB_PI_NEW_SESSION_CWD` | `$WEB_PI_HOME` | cwd for new sessions |
 | `WEB_PI_COMMAND` | `<app root>/node_modules/.bin/pi` (falls back to `pi` on PATH) | command run in a new session (whitespace-split; resume appends `--session <id>` — only pi-family CLIs support that) |
 | `WEB_PI_TMUX_SOCKET` | `web-pi` | the tmux socket the app owns |
+| `WEB_PI_TMUX_CONF` | `<app root>/tmux.conf` | tmux server config, applied when the tmux server starts (escape-time, scrollback, truecolour — see the file) |
 | `WEB_PI_AUTH_FILE` | `<app root>/auth.json` | credential file (0400) |
 | `WEB_PI_CLIENT_DIR` | `<app root>/dist/client` | Astro hashed assets |
 | `WEB_PI_ASTRO_ENTRY` | `<app root>/dist/server/entry.mjs` | Astro SSR handler |
@@ -187,6 +188,11 @@ shape is recommended.
 - `src/lib` — shared strict TS: auth (scrypt + sessions + rate limiter),
   tmux helpers, pi session-store parser, wire types
 - `server` — the Node server: Astro SSR (middleware) + assets + REST + WS → node-pty → tmux
+- `pi/` — the controlled pi agent-dir template (settings, MCPs, skills,
+  extensions) seeded into the runtime dir; `tmux.conf` at the root is the
+  tmux server config — together they're the shipped "environment config"
+- `Dockerfile`, `docker-entrypoint.sh`, `compose.yaml` — image (slim prod
+  default + toolchain dev target) and the prod/dev compose services
 - `.agents/skills/` — Web Awesome docs as pi skills: `webawesome` (component
   API reference) + `webawesome-design` (layout/theming/tokens), copied
   version-locked from the installed package by `tools/build_webawesome_skills.py`
