@@ -1,0 +1,48 @@
+---
+// offline.astro — the PWA offline shell.
+import Base from "../layouts/Base.astro";
+import "@awesome.me/webawesome/dist/components/card/card.js";
+import "@awesome.me/webawesome/dist/components/button/button.js";
+---
+
+<Base title="web-pi — offline">
+  <main class="offline-main wa-stack">
+    <wa-card class="offline-card">
+      <h1>
+        <!-- same prompt glyph as public/icons/icon.svg, inline so the shell
+             needs no icon fetches (wa-icon glyphs come from a CDN) -->
+        <svg class="offline-glyph" viewBox="0 0 512 512" aria-hidden="true">
+          <path
+            d="M168 172 L252 256 L168 340"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="56"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          ></path>
+          <path
+            d="M292 340 L376 340"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="56"
+            stroke-linecap="round"
+          ></path>
+        </svg>
+        offline
+      </h1>
+      <p>
+        web-pi needs a connection — the terminal runs over a live WebSocket.
+      </p>
+      <wa-button variant="brand" onclick="location.reload()">
+        reconnect
+      </wa-button>
+    </wa-card>
+  </main>
+</Base>
+
+<script>
+  import "@awesome.me/astro-lit/dsd-polyfill.js";
+  import "@awesome.me/astro-lit/hydration-support.js";
+  import "@awesome.me/webawesome/dist/components/card/card.js";
+  import "@awesome.me/webawesome/dist/components/button/button.js";
+</script>
