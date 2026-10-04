@@ -178,6 +178,42 @@ agent-terminal .terminal-status wa-icon { font-size: var(--wa-font-size-2xs); fl
 agent-terminal .terminal-status.ok wa-icon { color: var(--wa-color-success-fill-normal); }
 agent-terminal .terminal-status.err wa-icon { color: var(--wa-color-danger-fill-normal); }
 
+/* ---- settings ---- */
+.settings-main {
+  min-height: 100dvh; max-width: 48rem; margin-inline: auto;
+  padding: var(--wa-space-m);
+}
+.settings-header { align-items: center; }
+.settings-header h1 {
+  display: flex; align-items: center; gap: var(--wa-space-2xs);
+  font-size: var(--wa-font-size-l); margin: 0;
+}
+.settings-header h1 wa-icon { color: var(--wa-color-brand-fill-normal); }
+.settings-card .card-title { font-size: var(--wa-font-size-m); }
+.settings-card .hint code {
+  font-family: var(--wa-font-family-code); font-size: var(--wa-font-size-2xs);
+}
+.hint {
+  color: var(--wa-color-text-quiet); font-size: var(--wa-font-size-2xs); margin: 0;
+}
+.cfg-row { align-items: baseline; }
+.cfg-row .k {
+  color: var(--wa-color-text-quiet); font-size: var(--wa-font-size-s); flex: none;
+}
+.cfg-row .v {
+  font-family: var(--wa-font-family-code); font-size: var(--wa-font-size-s);
+  text-align: end; overflow-wrap: anywhere; min-width: 0;
+}
+.npm-output {
+  margin: 0; max-height: 40vh; overflow: auto;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  background: var(--wa-color-surface-lowered);
+  border: var(--wa-border-width-s) solid var(--wa-color-surface-border);
+  border-radius: var(--wa-border-radius-m);
+  padding: var(--wa-space-s);
+  font-family: var(--wa-font-family-code); font-size: var(--wa-font-size-xs);
+}
+
 /* ---- login ---- */
 .login-main {
   min-height: 100dvh; justify-content: center; align-items: center;

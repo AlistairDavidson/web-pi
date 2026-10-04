@@ -1,0 +1,177 @@
+---
+import Base from '../layouts/Base.astro';
+// Read-only settings dashboard: effective config from /api/settings (the
+// server computes; this page renders) + the one action, update pi
+// (POST /api/update-pi). Frontmatter imports SSR the wa-* components in
+// the markup; the <script> below re-imports them client-side so they
+// upgrade (AGENTS.md: SSR imports ≠ client imports).
+import '@awesome.me/webawesome/dist/components/card/card.js';
+import '@awesome.me/webawesome/dist/components/button/button.js';
+import '@awesome.me/webawesome/dist/components/icon/icon.js';
+import '@awesome.me/webawesome/dist/components/callout/callout.js';
+import '@awesome.me/webawesome/dist/components/badge/badge.js';
+import '@awesome.me/webawesome/dist/components/details/details.js';
+
+// Matches the server's WEB_PI_BASE ('' for root, else '/foo').
+const base = (import.meta.env.BASE_URL ?? '/').replace(/\/+$/, '');
+---
+<Base title="web-pi — settings">
+  <main class="settings-main wa-stack wa-gap-m">
+    <header class="settings-header wa-split">
+      <h1><wa-icon name="gear"></wa-icon> settings</h1>
+      <wa-button appearance="plain" size="s" href={`${base}/`}>
+        <wa-icon slot="start" name="arrow-left" label="back to the console"></wa-icon>
+        console
+      </wa-button>
+    </header>
+
+    <wa-card class="settings-card" with-header>
+      <div slot="header" class="wa-split">
+        <strong class="card-title">configuration</strong>
+        <span class="hint">effective values (defaults where no WEB_PI_* override is set)</span>
+      </div>
+      <div id="config" class="wa-stack wa-gap-2xs">
+        <span class="hint">loading…</span>
+      </div>
+    </wa-card>
+
+    <wa-card class="settings-card" with-header>
+      <div slot="header" class="wa-split">
+        <strong class="card-title">pi</strong>
+        <wa-badge id="pi-badge">pi …</wa-badge>
+      </div>
+      <div class="wa-stack wa-gap-s">
+        <div class="wa-split">
+          <div class="wa-stack wa-gap-3xs">
+            <span class="hint" id="pi-declared">declared …</span>
+            <span class="hint">runs <code>npm install @earendil-works/pi-coding-agent@latest</code> in the app's install dir</span>
+          </div>
+          <wa-button id="update-pi" variant="brand" size="s">
+            <wa-icon slot="start" name="rotate-right"></wa-icon>
+            update pi
+          </wa-button>
+        </div>
+        <p class="hint hidden" id="npm-missing">
+          npm was not found on the server's PATH — updating from here needs npm in the server's environment.
+        </p>
+        <wa-callout id="update-result" class="hidden"></wa-callout>
+        <wa-details id="update-output" summary="npm output" class="hidden">
+          <pre class="npm-output"></pre>
+        </wa-details>
+        <p class="hint">
+          After an update, restart the server to pick up the new pi. In the Docker dev
+          profile node_modules is a shadow volume — an update from here may not survive
+          the next container boot (README → Updating).
+        </p>
+      </div>
+    </wa-card>
+  </main>
+</Base>
+
+<script>
+  // Support modules MUST precede the wa-* imports — if the SSR'd elements
+  // define before lit hydration support installs, they render twice
+  // (@awesome.me/astro-lit README). Not script-position-dependent.
+  import '@awesome.me/astro-lit/dsd-polyfill.js';
+  import '@awesome.me/astro-lit/hydration-support.js';
+  // Client-side: define the SSR'd wa-* components (upgrade + hydrate).
+  import '@awesome.me/webawesome/dist/components/card/card.js';
+  import '@awesome.me/webawesome/dist/components/button/button.js';
+  import '@awesome.me/webawesome/dist/components/icon/icon.js';
+  import '@awesome.me/webawesome/dist/components/callout/callout.js';
+  import '@awesome.me/webawesome/dist/components/badge/badge.js';
+  import '@awesome.me/webawesome/dist/components/details/details.js';
+
+  import type { SettingsState, UpdateResult } from '../lib/types';
+  import { BASE } from '../base';
+
+  const esc = (s: string): string =>
+    s.replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c] as string));
+
+  interface WaButtonLike extends HTMLElement { loading: boolean; disabled: boolean }
+  interface WaCalloutLike extends HTMLElement { variant: string }
+  interface WaDetailsLike extends HTMLElement { open: boolean }
+  const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
+  const config = $('config');
+  const badge = $('pi-badge');
+  const declared = $('pi-declared');
+  const updateBtn = $<WaButtonLike>('update-pi');
+  const result = $<WaCalloutLike>('update-result');
+  const outputWrap = $<WaDetailsLike>('update-output');
+  const output = outputWrap.querySelector('pre')!;
+
+  let npmAvailable = true;
+
+  async function loadSettings(): Promise<void> {
+    let r: Response;
+    try { r = await fetch(`${BASE}/api/settings`); }
+    catch { config.innerHTML = '<span class="hint">could not reach the server</span>'; return; }
+    if (r.status === 401) { location.href = `${BASE}/login`; return; }
+    if (!r.ok) { config.innerHTML = `<span class="hint">could not load settings (HTTP ${r.status})</span>`; return; }
+    const s = await r.json() as SettingsState;
+
+    const rows: Array<[string, string]> = [
+      ['web-pi', `v${s.appVersion}`],
+      ['node', s.nodeVersion],
+      ['listen', `${s.host}:${s.port}`],
+      ['url base', s.base],
+      ['session command', s.command],
+      ['new-session cwd', s.newSessionCwd],
+      ['pi agent dir', s.agentDir],
+      ['sessions dir', s.sessionsDir],
+      ['auth file', s.authFile],
+      ['tmux socket', s.tmuxSocket],
+      ['tmux conf', s.tmuxConf ?? '(not present — tmux defaults)'],
+      ['install dir', s.appRoot],
+    ];
+    config.innerHTML = rows.map(([k, v]) =>
+      `<div class="cfg-row wa-split"><span class="k">${k}</span><span class="v">${esc(v)}</span></div>`).join('');
+
+    badge.textContent = `pi ${s.piInstalled ?? 'not installed'}`;
+    declared.textContent = `declared ${s.piDeclared} (${s.piPackage})`;
+    npmAvailable = s.npmAvailable;
+    if (!npmAvailable) {
+      updateBtn.disabled = true;
+      $('npm-missing').classList.remove('hidden');
+    }
+  }
+
+  updateBtn.addEventListener('click', async () => {
+    if (updateBtn.disabled) return;
+    updateBtn.loading = true;
+    updateBtn.disabled = true;
+    result.classList.add('hidden');
+    outputWrap.classList.add('hidden');
+    try {
+      const res = await fetch(`${BASE}/api/update-pi`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      if (res.status === 401) { location.href = `${BASE}/login`; return; }
+      const r = await res.json() as UpdateResult;
+      if (r.ok && !r.dryRun && r.after !== r.before) {
+        result.variant = 'success';
+        result.textContent = `updated pi ${r.before ?? 'not installed'} → ${r.after ?? 'not installed'} — restart the server to pick it up`;
+        void loadSettings(); // npm may have re-pinned the declared range
+      } else if (r.ok) {
+        result.variant = 'success';
+        result.textContent = `pi ${r.after ?? 'not installed'} is already installed — no change`;
+      } else {
+        result.variant = 'danger';
+        result.textContent = r.error ?? `update failed (HTTP ${res.status})`;
+      }
+      if (r.output) { output.textContent = r.output; outputWrap.open = true; outputWrap.classList.remove('hidden'); }
+      result.classList.remove('hidden');
+    } catch (e) {
+      result.variant = 'danger';
+      result.textContent = `request failed: ${(e as Error).message}`;
+      result.classList.remove('hidden');
+    } finally {
+      updateBtn.loading = false;
+      updateBtn.disabled = !npmAvailable;
+    }
+  });
+
+  loadSettings();
+</script>

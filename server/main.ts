@@ -17,7 +17,10 @@ import { HiddenSessions, SESSION_ID_RE } from '../src/lib/hidden-sessions';
 import * as tmux from '../src/lib/tmux';
 import { ENV, RAW_ENV, APP_ROOT, PI_BIN, PI_AGENT_DIR, PI_SESSION_DIR } from '../src/lib/env';
 import * as jobs from '../src/lib/jobs';
-import type { ClientMsg, ServerMsg, ConsoleState } from '../src/lib/types';
+import {
+  BUSY_ERROR, PI_PACKAGE, appVersion, npmPath, piDeclared, piInstalled, runPiUpdate,
+} from '../src/lib/settings';
+import type { ClientMsg, ServerMsg, ConsoleState, SettingsState } from '../src/lib/types';
 
 // URL base path ('/' or '/foo', no trailing slash). Must match the base
 // the pages were built with (astro.config.mjs reads the same env at build).
@@ -220,13 +223,16 @@ const server = http.createServer((req, res) => {
   // Everything below requires a valid session...
   if (!authed(req)) {
     // ...except the login page + its hashed assets (every data/terminal
-    // route stays 401), and the PWA offline shell (static, session-free —
-    // the service worker precaches it at install time, pre-auth).
+    // route stays 401), the PWA offline shell (static, session-free —
+    // the service worker precaches it at install time, pre-auth), and the
+    // /settings dashboard (same gate as the shell: login first).
     if (req.method === 'GET' && url === route('/offline')) {
       renderAstro(req, res);
       return;
     }
-    if (req.method === 'GET' && (url === CFG.base || url === CFG.base + '/' || url === route('/login'))) {
+    if (req.method === 'GET' &&
+        (url === CFG.base || url === CFG.base + '/' || url === route('/login') ||
+         url === route('/settings'))) {
       req.url = route('/login'); // render the login page whatever the shell URL
       renderAstro(req, res);
       return;
@@ -268,7 +274,6 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // ---------- /api/jobs: scheduled jobs (systemd user units) ----------
   // Listed with available:false (200) when systemctl --user is unusable —
   // the /jobs page renders an explanatory notice instead of 500s; the
   // mutating routes 503 in that case. See src/lib/jobs.ts for the
@@ -338,6 +343,45 @@ const server = http.createServer((req, res) => {
       if (!saveErr) { sendJSON(res, 200, { ok: true }); return; }
       if (saveErr.message === 'invalid session id') { send(res, 400, 'invalid session id'); return; }
       sendJSON(res, 500, { error: 'could not save hidden state' });
+    });
+    return;
+  }
+
+  // Paths and versions only — no credential or hash contents ever leave.
+  if (req.method === 'GET' && url === route('/api/settings')) {
+    const state: SettingsState = {
+      me: 'ok',
+      appVersion: appVersion(APP_ROOT),
+      nodeVersion: process.version,
+      host: CFG.host,
+      port: CFG.port,
+      base: CFG.base,
+      command: CFG.command.join(' '),
+      newSessionCwd: CFG.newSessionCwd,
+      agentDir: CFG.agentDir,
+      sessionsDir: CFG.sessionsDir,
+      authFile: CFG.authFile,
+      tmuxSocket: tmux.SOCKET,
+      tmuxConf: fs.existsSync(tmux.CONF) ? tmux.CONF : null,
+      appRoot: APP_ROOT,
+      piPackage: PI_PACKAGE,
+      piDeclared: piDeclared(APP_ROOT),
+      piInstalled: piInstalled(APP_ROOT),
+      npmAvailable: npmPath() !== null,
+    };
+    sendJSON(res, 200, state);
+    return;
+  }
+
+  // Manual `npm install pi@latest` in the app dir. Long-running by design
+  // (npm timeout 10 min server-side); concurrent runs are refused (409).
+  // {dryRun:true} is a check-only mode: proves npm runs, installs nothing.
+  if (req.method === 'POST' && url === route('/api/update-pi')) {
+    readBody(req, (err, body) => {
+      if (err) { send(res, 400, 'bad request'); return; }
+      runPiUpdate(APP_ROOT, body?.dryRun === true, r => {
+        sendJSON(res, r.ok ? 200 : (r.error === BUSY_ERROR ? 409 : 500), r);
+      });
     });
     return;
   }

@@ -73,6 +73,46 @@ export interface CalendarCheck {
   validatedBy: 'systemd-analyze' | 'basic';
 }
 
+// ---- settings dashboard (/settings ← /api/settings; /api/update-pi) ----
+// Effective (resolved, defaults applied) config for the read-only dashboard.
+// Paths only — never credential or hash contents.
+export interface SettingsState {
+  me: 'ok';
+  appVersion: string;
+  nodeVersion: string;
+  host: string;
+  port: number;
+  base: string;
+  command: string;
+  newSessionCwd: string;
+  agentDir: string;
+  sessionsDir: string;
+  authFile: string;
+  tmuxSocket: string;
+  tmuxConf: string | null;
+  appRoot: string;
+  piPackage: string;
+  piDeclared: string;
+  piInstalled: string | null;
+  npmAvailable: boolean;
+}
+
+/** Result of POST /api/update-pi (manual `npm install pi@latest`). */
+export interface UpdateResult {
+  ok: boolean;
+  dryRun: boolean;
+  /** what ran / would run, for display */
+  command: string;
+  /** installed pi version before (null: not installed) */
+  before: string | null;
+  /** installed pi version after */
+  after: string | null;
+  /** captured npm output (dry-run: check output), capped */
+  output: string;
+  /** failure reason when !ok */
+  error?: string;
+}
+
 // ---- WS wire protocol (JSON envelopes) ----
 export type ClientMsg =
   | { type: 'attach'; mode: 'live'; target: string }
