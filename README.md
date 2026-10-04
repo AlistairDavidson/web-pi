@@ -151,18 +151,58 @@ sidebar unless you point `WEB_PI_SESSIONS_DIR` there.
 
 ## Deploying
 
-See [`deploy/`](deploy/) for:
+Container-first:
 
-- `webpi.service` — systemd unit incl. a hardening set (with notes on the
-  directives that deliberately aren't there: `PrivateTmp` hides the tmux
-  socket, `MemoryDenyWriteExecute` breaks V8's JIT)
+```sh
+docker compose build        # subpath deploy: WEB_PI_BASE=/console docker compose build
+docker compose up -d        # loopback :3000, app on the named volume webpi-app
+```
+
+Front it with TLS — [`deploy/`](deploy/) has:
+
 - `nginx-webpi.conf` — TLS reverse proxy with the WebSocket upgrade map
+  (upstream is the published loopback port)
 - fail2ban filter + jail watching the nginx access log for failed logins
 
-The original deployment (which this project was spun out of) runs behind
-nginx at a `/console/` path on a single-purpose box with the app user owning
-everything — one user, one port on loopback, fail2ban from day one. That
-shape is recommended.
+The old systemd unit is gone: the container *is* the unit (restart policy
++ healthcheck in compose; `ProtectSystem`-style hardening is the container
+boundary). The original deployment shape still applies — nginx at a
+`/console/` path on a single-purpose box, fail2ban from day one.
+
+### Updating
+
+**pi, in place — no web-pi release needed:**
+
+```sh
+docker compose exec webpi npm install @earendil-works/pi-coding-agent@latest
+```
+
+Stay within the `^1` range web-pi declares (its session-listing and resume
+code is written against that major). New sessions pick the new binary up
+immediately — pi is exec'd per session, nothing restarts; running sessions
+finish on the old one. The boot log and `/api/state` confirm what's live.
+Note: an app-image sync (below) re-pins pi to the lockfile — re-apply
+afterwards if you want the newer one.
+
+**App code:** rebuild + `up -d`. The entrypoint hashes the image's source
+tree; on change it syncs app files into the existing volume while volume
+state survives untouched (`auth.json`, `.pi-agent/`, `apps/`, anything not
+in the image). Volumes never re-seed when content hasn't changed.
+
+**Git-owned volume (self-modification, durable local edits):** the named
+volume is image-tracked — hand edits survive only until the next image
+sync. To own updates with git instead, replace the volume with a checkout:
+
+```sh
+docker compose down
+# edit compose: volumes: ["/srv/web-pi:/app"] instead of the named volume
+git clone <your-fork> /srv/web-pi
+docker compose up -d          # entrypoint sees /app/.git and never syncs
+```
+
+Updates are then `git pull` + `npm install` + `npm run build` inside the
+container, restart to serve — which is also the workflow pi sessions use
+when they modify the app on the server (the rollback TODO builds on this).
 
 ## Security model
 

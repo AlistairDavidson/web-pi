@@ -1,18 +1,12 @@
-Pi should be a dependency and this project should keep it up to date and control the pi config / mcps / skills / extensions when deployed/installed (dev should not alter any global config).
-
-tmux is also effectively a dependency and tmux config is certainly vital to a successful deployment - handle as much in-project as we can.
-
 apps folder that contains git submodules
 
-update pi button
+settings page
+
+update pi button, auto-update setting
 
 console is an app
 
 Top menu with all apps
-
-
-
-deploy whole project not just dist to server, so you can do AI dev including self-modification right on server
 
 rollback capability if you fuck up - a panic endpoint that is protected from modification and lets you pick a git commit and rebuild, give basic feedback.
 
@@ -71,6 +65,16 @@ low priority xterm official addons:
   search addon + ctrl+F bar (wa-input cluster in terminal toolbar, NOT the session sidebar - 15s innerHTML poll eats state) server backfill via `tmux capture-pane -S -5000 -p` written to WS on attach so resumed sessions have searchable scrollback
   
   serialize - "download transcript" / "copy output" button, zero server changes; maybe e2e assertions on terminal state 
+
+push to github so dependabot wakes up (.github/dependabot.yml is wired: npm weekly incl pi ^1, docker base images)
+
+registry deploy flow - CI builds/pushes the image on tag, `docker compose pull` for boxes that shouldn't build
+
+npm publish packaging - bin/files/prepublishOnly build so `npm i -g web-pi` is a real deploy channel
+
+tmux sessions die with container restarts (sidebar resume covers it) - accept + document, or supervise tmux separately so it outlives the server process
+
+wheel-scroll decision: tmux mouse on + pi tuiMode regular gives wheel-scrollback but loses fullscreen pi (tradeoff documented in tmux.conf)
 
 Human:
 make sidebar much nicer - rebuild step by step, maybe

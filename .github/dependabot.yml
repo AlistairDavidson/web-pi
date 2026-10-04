@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # npm: pi rides ^1 (in-range minors are safe by contract — web-pi programs
+  # against pi's session format/CLI, semver guards it). Astro & co ride
+  # their carets; review release notes for anything breaking.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+  # Docker: base-image tag bumps (node:22-bookworm-slim).
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
