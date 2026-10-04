@@ -138,7 +138,9 @@ agent-terminal .terminal-status.err wa-icon { color: var(--wa-color-danger-fill-
 .login-card h1 wa-icon { color: var(--wa-color-brand-fill-normal); }
 .login-card wa-button { width: 100%; margin-block-start: var(--wa-space-2xs); }
 
-/* ---- offline (PWA shell served by the service worker) ---- */
+.offline-card wa-button { width: 100%; }
+
+/* ---- jobs page (<jobs-app>) ---- */
 .offline-main {
   min-height: 100dvh; justify-content: center; align-items: center;
   padding: var(--wa-space-m);
@@ -155,4 +157,57 @@ agent-terminal .terminal-status.err wa-icon { color: var(--wa-color-danger-fill-
 .offline-card p {
   color: var(--wa-color-text-quiet); margin: 0 0 var(--wa-space-m);
 }
-.offline-card wa-button { width: 100%; }
+
+jobs-app { display: block; min-height: 100dvh; }
+.jobs-main { max-width: 46rem; margin: 0 auto; padding: var(--wa-space-m); }
+.jobs-header { align-items: center; }
+.jobs-header h1 {
+  display: flex; align-items: center; gap: var(--wa-space-2xs);
+  font-size: var(--wa-font-size-m); margin: 0;
+}
+.jobs-header h1 wa-icon { color: var(--wa-color-brand-fill-normal); }
+.jobs-sub { color: var(--wa-color-text-quiet); margin: 0; }
+.jobs-sub code, .job-meta code, #jobs-degraded code {
+  font-family: var(--wa-font-family-code);
+  background: var(--wa-color-surface-lowered);
+  border: var(--wa-border-width-s) solid var(--wa-color-surface-border);
+  border-radius: var(--wa-border-radius-s);
+  padding: var(--wa-space-3xs) var(--wa-space-2xs);
+  overflow-wrap: anywhere;
+}
+.jobs-degraded-detail { color: var(--wa-color-text-quiet); }
+.jobs-empty {
+  color: var(--wa-color-text-quiet); margin: 0;
+  padding: var(--wa-space-m); text-align: center;
+  border: var(--wa-border-width-s) dashed var(--wa-color-surface-border);
+  border-radius: var(--wa-border-radius-m);
+}
+.job-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--wa-space-xs); flex-wrap: wrap;
+}
+.job-name {
+  display: flex; align-items: center; gap: var(--wa-space-2xs);
+  font-weight: var(--wa-font-weight-bold);
+}
+.job-name wa-icon { color: var(--wa-color-brand-fill-normal); font-size: var(--wa-font-size-2xs); }
+.job-view {
+  display: inline-flex; align-items: center; gap: var(--wa-space-3xs);
+  color: var(--wa-color-brand-fill-normal); text-decoration: none;
+  font-size: var(--wa-font-size-2xs);
+}
+.job-view:hover { text-decoration: underline; }
+.job-view wa-icon { font-size: var(--wa-font-size-2xs); }
+.job-meta {
+  display: grid; grid-template-columns: max-content 1fr;
+  gap: var(--wa-space-3xs) var(--wa-space-s); margin: 0;
+}
+.job-meta dt { color: var(--wa-color-text-quiet); }
+.job-meta dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.job-actions { margin-block-start: var(--wa-space-s); }
+.schedule-feedback {
+  font-size: var(--wa-font-size-2xs); min-height: 1.4em;
+  margin-block-start: var(--wa-space-3xs);
+}
+.schedule-feedback.ok { color: var(--wa-color-success-fill-normal); }
+.schedule-feedback.err { color: var(--wa-color-danger-fill-normal); }

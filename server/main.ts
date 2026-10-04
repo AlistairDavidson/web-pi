@@ -15,6 +15,7 @@ import { Auth, RateLimiter, type Auth as AuthType } from '../src/lib/auth';
 import { listSessions, findSession } from '../src/lib/sessions';
 import * as tmux from '../src/lib/tmux';
 import { ENV, RAW_ENV, APP_ROOT, PI_BIN, PI_AGENT_DIR, PI_SESSION_DIR } from '../src/lib/env';
+import * as jobs from '../src/lib/jobs';
 import type { ClientMsg, ServerMsg, ConsoleState } from '../src/lib/types';
 
 // URL base path ('/' or '/foo', no trailing slash). Must match the base
@@ -258,6 +259,51 @@ const server = http.createServer((req, res) => {
         sendJSON(res, 200, { name });
       });
     });
+    return;
+  }
+
+  // ---------- /api/jobs: scheduled jobs (systemd user units) ----------
+  // Listed with available:false (200) when systemctl --user is unusable —
+  // the /jobs page renders an explanatory notice instead of 500s; the
+  // mutating routes 503 in that case. See src/lib/jobs.ts for the
+  // webpi-* unit conventions and ownership invariant.
+  if (url === route('/api/jobs') || url.startsWith(route('/api/jobs/'))) {
+    const sub = url.slice(route('/api/jobs').length);
+    const jobCtx = { cwd: CFG.newSessionCwd, env: sessionEnv };
+    const fail = (e: Error): void => sendJSON(res, 500, { error: e.message });
+    const reply = (r: jobs.JobOp): void => sendJSON(res, r.ok ? 200 : r.status,
+      r.ok ? { name: r.name, session: r.session ?? null } : { error: r.error, detail: r.detail });
+
+    if (req.method === 'GET' && sub === '') {
+      jobs.listJobs().then(st => sendJSON(res, 200, st)).catch(fail);
+      return;
+    }
+    if (req.method === 'POST' && (sub === '' || sub === '/validate')) {
+      readBody(req, (err, body) => {
+        if (err) { send(res, 400, 'bad request'); return; }
+        if (sub === '/validate') {
+          jobs.checkCalendar(String(body?.schedule ?? '')).then(c => sendJSON(res, 200, c)).catch(fail);
+        } else {
+          jobs.saveJob({
+            name: String(body?.name ?? ''),
+            schedule: String(body?.schedule ?? ''),
+            command: String(body?.command ?? ''),
+          }, jobCtx).then(reply).catch(fail);
+        }
+      });
+      return;
+    }
+    const runNow = sub.match(/^\/([^/]+)\/run$/);
+    if (req.method === 'POST' && runNow) {
+      jobs.runJob(decodeURIComponent(runNow[1]!)).then(reply).catch(fail);
+      return;
+    }
+    const remove = sub.match(/^\/([^/]+)$/);
+    if (req.method === 'DELETE' && remove) {
+      jobs.deleteJob(decodeURIComponent(remove[1]!)).then(reply).catch(fail);
+      return;
+    }
+    send(res, 404, 'not found');
     return;
   }
 

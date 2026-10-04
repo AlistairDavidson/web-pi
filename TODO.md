@@ -36,10 +36,6 @@ side-tab bar lets you open a given app
 
 max what we can get out of xterm and tmux - scroll wheel scrolling up the terminal instead of being interpreted as up arrow would be good
 
-"cron" management (systemd backend)
-  See jobs
-  Open sessions - same functionality as main page
-  
 Better auth
 
 DB backend (pi-durable supplies this?)

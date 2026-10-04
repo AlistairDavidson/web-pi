@@ -21,6 +21,30 @@ if (RAW_ENV.WEB_PI_TMUX_CONF && !fs.existsSync(CONF)) {
   console.warn(`WEB_PI_TMUX_CONF=${CONF} does not exist — using tmux defaults`);
 }
 
+/** Session name a scheduled job's run opens on this socket (src/lib/jobs.ts
+ *  bakes it into its unit files; the Live list shows it like any session). */
+export function jobSessionName(job: string): string {
+  return `webpi-${job}`;
+}
+
+/** Absolute tmux path for unit files (cached) — systemd user units run with
+ *  a spartan PATH, so a bare "tmux" may not resolve there. */
+export function tmuxPath(): Promise<string> {
+  tmuxPathCached ??= new Promise(resolve => {
+    execFile('/bin/sh', ['-c', 'command -v tmux'], { timeout: 5000 }, (err, out) => {
+      resolve(!err && String(out).trim() ? String(out).trim() : 'tmux');
+    });
+  });
+  return tmuxPathCached;
+}
+let tmuxPathCached: Promise<string> | null = null;
+
+/** Leading argv every unit-file tmux invocation needs: the server config
+ *  (when present) and the app's socket. Mirrors the tmux() wrapper above. */
+export function baseArgs(): string[] {
+  return [...(fs.existsSync(CONF) ? ['-f', CONF] : []), '-L', SOCKET];
+}
+
 type Cb<T> = (err: Error | null, out: T) => void;
 
 function tmux(socket: string, args: string[], cb: (err: Error | null, stdout: string) => void,
@@ -80,5 +104,12 @@ export function resumeSession(shortName: string, cwd: string, command: string[],
     tmux(SOCKET,
       ['new-session', '-d', '-s', shortName, '-c', cwd, ...envArgs(env), '--', ...command, '--session', sessionId],
       e2 => cb(e2), env);
+  });
+}
+
+/** Sessions alive on the app socket, as a name set (job state checks). */
+export function liveSessionNames(cb: Cb<Set<string>>): void {
+  listSessions((err, live) => {
+    cb(err, new Set(live.map(s => s.name)));
   });
 }

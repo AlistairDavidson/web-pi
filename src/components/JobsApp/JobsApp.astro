@@ -1,0 +1,102 @@
+---
+import "@awesome.me/webawesome/dist/components/button/button.js";
+import "@awesome.me/webawesome/dist/components/icon/icon.js";
+import "@awesome.me/webawesome/dist/components/card/card.js";
+import "@awesome.me/webawesome/dist/components/badge/badge.js";
+import "@awesome.me/webawesome/dist/components/callout/callout.js";
+import "@awesome.me/webawesome/dist/components/dialog/dialog.js";
+import "@awesome.me/webawesome/dist/components/input/input.js";
+import "@awesome.me/webawesome/dist/components/textarea/textarea.js";
+import "@awesome.me/webawesome/dist/components/toast/toast.js";
+---
+
+<jobs-app>
+  <div class="jobs-main wa-stack wa-gap-m">
+    <header class="jobs-header wa-split">
+      <h1>
+        <wa-icon name="clock"></wa-icon> scheduled jobs
+      </h1>
+      <div class="wa-cluster wa-gap-2xs">
+        <wa-button id="jobs-console" appearance="plain" size="s">
+          <wa-icon slot="start" name="terminal"></wa-icon>console
+        </wa-button>
+        <wa-button id="jobs-new" variant="brand" size="s">
+          <wa-icon slot="start" name="plus"></wa-icon>new job
+        </wa-button>
+      </div>
+    </header>
+    <p class="jobs-sub">
+      A job is a systemd user timer (<code>webpi-&lt;name&gt;.timer</code>) that
+      runs a shell command inside a tmux session on the app's socket — every run
+      shows up in the console's <strong>Live</strong> list and is attachable,
+      just like a session you started yourself.
+    </p>
+    <wa-callout id="jobs-degraded" variant="warning" class="hidden">
+      <wa-icon slot="icon" name="triangle-exclamation"></wa-icon>
+      <strong>scheduled jobs are unavailable here.</strong>
+      <br />
+      web-pi manages jobs through <code>systemctl --user</code>, and this server
+      can't reach a systemd user session (containers typically have none). On
+      the host: run web-pi on a systemd box as your own user and{" "}
+      <code>loginctl enable-linger $USER</code>
+      if it should fire while you're logged out.
+      <span id="jobs-degraded-detail" class="jobs-degraded-detail"></span>
+    </wa-callout>
+    <div id="jobs-list" class="wa-stack wa-gap-s"></div>
+  </div>
+
+  <wa-dialog id="job-dialog" label="new job" with-footer>
+    <form id="job-form" class="wa-stack wa-gap-s" novalidate>
+      <wa-input
+        id="job-name"
+        label="name"
+        placeholder="nightly-check"
+        maxlength="40"
+        hint="units are created as webpi-<name>.service + webpi-<name>.timer"
+      ></wa-input>
+      <div>
+        <wa-input
+          id="job-schedule"
+          label="schedule (systemd OnCalendar)"
+          placeholder="Mon..Fri 09:00"
+          hint="hourly · daily 08:00 · Mon..Fri 09:30 · *-*-* 12:30:00"
+        ></wa-input>
+        <div
+          id="schedule-feedback"
+          class="schedule-feedback"
+          aria-live="polite"
+        ></div>
+      </div>
+      <wa-textarea
+        id="job-command"
+        label="command (shell; runs in tmux session webpi-<name>)"
+        placeholder='pi -p "summarize today&apos;s commits"'
+        rows="3"
+      ></wa-textarea>
+    </form>
+    <wa-button slot="footer" appearance="plain" data-dialog="close">
+      cancel
+    </wa-button>
+    <wa-button slot="footer" id="job-save" variant="brand">
+      save
+    </wa-button>
+  </wa-dialog>
+
+  <wa-dialog id="job-delete-dialog" label="delete job" with-footer>
+    <p id="job-delete-text"></p>
+    <wa-button slot="footer" appearance="plain" data-dialog="close">
+      cancel
+    </wa-button>
+    <wa-button slot="footer" id="job-delete-confirm" variant="danger">
+      delete
+    </wa-button>
+  </wa-dialog>
+
+  <wa-toast placement="bottom-start"></wa-toast>
+</jobs-app>
+
+<script>
+  import "@awesome.me/astro-lit/dsd-polyfill.js";
+  import "@awesome.me/astro-lit/hydration-support.js";
+  import "./jobs-app";
+</script>

@@ -193,6 +193,49 @@ test('terminal fills the available space and refits when it shrinks', async ({ p
   expect(await termRows(page)).toBeLessThan(rowsBefore);
 });
 
+// jobs (scheduled jobs, systemd user units): the suite's hermetic
+// container has no `systemctl --user`, so the CRUD flow can't run there.
+// What runs everywhere without systemd is the degraded-mode contract:
+// the /jobs page shows an explanatory notice and the API answers
+// 200/503 — never a stack of 500s. On a host with a working user session
+// this skips (CRUD coverage needs the real backend).
+const systemdUserSession = (() => {
+  try {
+    execFileSync('systemctl', ['--user', 'show-environment'], { stdio: 'ignore' });
+    return true;
+  } catch { return false; }
+})();
+
+test('jobs page degrades to a notice when systemctl --user is absent', async ({ page, request }) => {
+  test.skip(systemdUserSession, 'systemd user session present — degraded mode not reachable');
+  expect((await request.get('/api/jobs')).status()).toBe(401);
+
+  await login(page);
+  await expect(page.locator('wa-button#nav-jobs')).toHaveCount(1);
+
+  const r = await page.request.get('/api/jobs');
+  expect(r.status()).toBe(200);
+  expect(await r.json()).toMatchObject({ available: false, jobs: [] });
+
+  await page.goto('/jobs');
+  await expect(page.locator('wa-callout#jobs-degraded:not(.hidden)')).toBeVisible();
+  await expect(page.locator('wa-callout#jobs-degraded')).toContainText('systemctl --user');
+  await expect(page.locator('wa-button#jobs-new.hidden')).toHaveCount(1);
+
+  const validate = await page.request.post('/api/jobs/validate', { data: { schedule: 'daily 08:00' } });
+  expect(validate.status()).toBe(200);
+  const check = await validate.json() as { valid: boolean; validatedBy: string };
+  expect(check.valid).toBe(true);
+  expect(['basic', 'systemd-analyze']).toContain(check.validatedBy);
+
+  // Mutations degrade to 503 (not 500) while the backend is unusable.
+  const create = await page.request.post('/api/jobs',
+    { data: { name: 'itest-job', schedule: 'daily 08:00', command: 'true' } });
+  expect(create.status()).toBe(503);
+  expect((await page.request.post('/api/jobs/itest-job/run')).status()).toBe(503);
+  expect((await page.request.delete('/api/jobs/itest-job')).status()).toBe(503);
+});
+
 test('login rate limit kicks in (10 per 15 min per IP)', async ({ request }) => {
   // Runs last: earlier tests already spent part of the shared budget.
   let saw429 = false;

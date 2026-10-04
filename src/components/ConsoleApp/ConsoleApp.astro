@@ -15,10 +15,15 @@ import AgentTerminal from '../AgentTerminal/AgentTerminal.astro';
   <wa-page>
     <header slot="navigation-header" class="nav-header wa-split">
       <h1><wa-icon name="terminal"></wa-icon> web-pi</h1>
-      <wa-button id="logout" appearance="plain" size="s">
-        <wa-icon slot="start" name="right-from-bracket"></wa-icon>
-        sign out
-      </wa-button>
+      <div class="wa-cluster wa-gap-2xs">
+        <wa-button id="nav-jobs" appearance="plain" size="s">
+          <wa-icon slot="start" name="clock"></wa-icon>jobs
+        </wa-button>
+        <wa-button id="logout" appearance="plain" size="s">
+          <wa-icon slot="start" name="right-from-bracket"></wa-icon>
+          sign out
+        </wa-button>
+      </div>
     </header>
     <session-sidebar slot="navigation"></session-sidebar>
     <main><AgentTerminal /></main>

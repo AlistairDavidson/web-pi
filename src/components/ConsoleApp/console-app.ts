@@ -19,6 +19,12 @@ type WaToast = HTMLElement & {
 export class ConsoleApp extends HTMLElement {
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private activeKey: string | null = null;
+  /** Deep-link target (/?live=<session>) — attached on the first state
+   *  load that sees the session alive (e.g. "view run" from /jobs). */
+  private pendingLive: string | null = (() => {
+    const v = new URLSearchParams(location.search).get('live') ?? '';
+    return /^[a-zA-Z0-9_-]{1,40}$/.test(v) ? v : null;
+  })();
 
   connectedCallback(): void {
     const term = this.querySelector('agent-terminal') as
@@ -55,6 +61,9 @@ export class ConsoleApp extends HTMLElement {
       term.attach('live', out.name, this.activeKey);
     });
     this.addEventListener('terminal-closed', () => this.loadState());
+    (this.querySelector('#nav-jobs') as HTMLElement).onclick = () => {
+      location.href = `${BASE}/jobs`;
+    };
     (this.querySelector('#logout') as HTMLElement).onclick = async () => {
       await fetch(`${BASE}/logout`, { method: 'POST' });
       location.href = `${BASE}/login`;
@@ -76,6 +85,18 @@ export class ConsoleApp extends HTMLElement {
     const st = await r.json() as ConsoleState;
     const sidebar = this.querySelector('session-sidebar');
     if (sidebar) (sidebar as import('../session-sidebar').SessionSidebar).render(st, this.activeKey);
+    if (this.pendingLive) {
+      const target = this.pendingLive;
+      if (st.live.some(s => s.name === target)) {
+        this.pendingLive = null;
+        this.activeKey = `live:${target}`;
+        const term = this.querySelector('agent-terminal') as
+          (import('../AgentTerminal/agent-terminal').AgentTerminal & HTMLElement) | null;
+        term?.attach('live', target, this.activeKey);
+        (sidebar as import('../session-sidebar').SessionSidebar | null)
+          ?.render(st, this.activeKey);
+      }
+    }
   }
 }
 
