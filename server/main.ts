@@ -5,7 +5,6 @@
 // (deploy/nginx-webpi.conf). Config: WEB_PI_* env (README table).
 import * as http from 'node:http';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFile } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
@@ -15,6 +14,7 @@ import * as pty from 'node-pty';
 import { Auth, RateLimiter, type Auth as AuthType } from '../src/lib/auth';
 import { listSessions, findSession } from '../src/lib/sessions';
 import * as tmux from '../src/lib/tmux';
+import { ENV, RAW_ENV, APP_ROOT, PI_BIN, PI_AGENT_DIR, PI_SESSION_DIR } from '../src/lib/env';
 import type { ClientMsg, ServerMsg, ConsoleState } from '../src/lib/types';
 
 // URL base path ('/' or '/foo', no trailing slash). Must match the base
@@ -26,13 +26,7 @@ function normalizeBase(raw: string): string {
   return b;
 }
 
-const home = process.env.WEB_PI_HOME ?? os.homedir();
-// dist-server/server/main.js → app root is two levels up
-const appRoot = path.join(__dirname, '..', '..');
-
-// pi ships as an npm dependency: prefer the vendored binary, fall back to a
-// pi on PATH only if it's missing (partial deploy, WEB_PI_COMMAND override).
-const piBin = path.join(appRoot, 'node_modules', '.bin', 'pi');
+const home = ENV.WEB_PI_HOME;
 
 // Controlled pi config. `pi/` in the repo is the versioned template
 // (settings.json, mcp.json, skills/, extensions/, …); the runtime agent dir
@@ -41,32 +35,26 @@ const piBin = path.join(appRoot, 'node_modules', '.bin', 'pi');
 // NB: PI_CODING_AGENT_DIR in the *server's* environment is deliberately NOT
 // a fallback — on an operator's box that's their real agent dir, and seeding
 // it would overwrite their config.
-const agentDir = process.env.WEB_PI_AGENT_DIR ?? path.join(appRoot, '.pi-agent');
-if (process.env.PI_CODING_AGENT_DIR && !process.env.WEB_PI_AGENT_DIR) {
-  console.error(`PI_CODING_AGENT_DIR is set (${process.env.PI_CODING_AGENT_DIR}) — ignoring it; ` +
+const agentDir = ENV.WEB_PI_AGENT_DIR;
+if (PI_AGENT_DIR && !RAW_ENV.WEB_PI_AGENT_DIR) {
+  console.error(`PI_CODING_AGENT_DIR is set (${PI_AGENT_DIR}) — ignoring it; ` +
     `web-pi uses its own runtime agent dir (${agentDir}). Set WEB_PI_AGENT_DIR to move it.`);
 }
-const agentTemplate = path.join(appRoot, 'pi');
+const agentTemplate = path.join(APP_ROOT, 'pi');
 
 const CFG = {
-  host: process.env.WEB_PI_HOST ?? '127.0.0.1',
-  port: parseInt(process.env.WEB_PI_PORT ?? '3000', 10),
-  base: normalizeBase(process.env.WEB_PI_BASE ?? '/'),
+  host: ENV.WEB_PI_HOST,
+  port: ENV.WEB_PI_PORT,
+  base: normalizeBase(ENV.WEB_PI_BASE),
   home,
   agentDir,
-  authFile: process.env.WEB_PI_AUTH_FILE ?? path.join(appRoot, 'auth.json'),
-  clientDir: process.env.WEB_PI_CLIENT_DIR ?? path.join(appRoot, 'dist', 'client'),
-  astroEntry: process.env.WEB_PI_ASTRO_ENTRY ?? path.join(appRoot, 'dist', 'server', 'entry.mjs'),
-  // pi's own session-store resolution, mirrored (pi env docs):
-  // PI_CODING_AGENT_SESSION_DIR, else <agent dir>/sessions — the runtime
-  // agent dir by default, so the sidebar lists where spawned pi writes.
-  sessionsDir: process.env.WEB_PI_SESSIONS_DIR
-    ?? process.env.PI_CODING_AGENT_SESSION_DIR
-    ?? path.join(agentDir, 'sessions'),
-  newSessionCwd: process.env.WEB_PI_NEW_SESSION_CWD ?? home,
+  authFile: ENV.WEB_PI_AUTH_FILE,
+  clientDir: ENV.WEB_PI_CLIENT_DIR,
+  astroEntry: ENV.WEB_PI_ASTRO_ENTRY,
+  sessionsDir: ENV.WEB_PI_SESSIONS_DIR,
+  newSessionCwd: ENV.WEB_PI_NEW_SESSION_CWD,
   // whitespace-split command line; resume appends --session <id> (pi-family CLI)
-  command: (process.env.WEB_PI_COMMAND ?? (fs.existsSync(piBin) ? piBin : 'pi'))
-    .trim().split(/\s+/).filter(Boolean),
+  command: ENV.WEB_PI_COMMAND.trim().split(/\s+/).filter(Boolean),
 };
 
 /** Seed the runtime agent dir from the versioned template, only where the
@@ -104,8 +92,8 @@ const sessionEnv: Record<string, string> = {
   HOME: CFG.home,
   PI_CODING_AGENT_DIR: CFG.agentDir,
 };
-if (process.env.PI_CODING_AGENT_SESSION_DIR) {
-  sessionEnv.PI_CODING_AGENT_SESSION_DIR = process.env.PI_CODING_AGENT_SESSION_DIR;
+if (PI_SESSION_DIR) {
+  sessionEnv.PI_CODING_AGENT_SESSION_DIR = PI_SESSION_DIR;
 }
 
 /** Route path under the configured base ('/login' → '/foo/login'). */
@@ -362,8 +350,8 @@ server.listen(CFG.port, CFG.host, () => {
   console.log(`web-pi listening on ${CFG.host}:${CFG.port} base ${CFG.base} ` +
     `(tmux socket ${tmux.SOCKET}, command "${CFG.command.join(' ')}", client ${CFG.clientDir}, sessions ${CFG.sessionsDir})`);
   // Best-effort vendored-pi version at boot — makes dependency drift visible.
-  if (CFG.command[0] === piBin) {
-    execFile(piBin, ['--version'], { timeout: 5000 }, (err, out) =>
+  if (CFG.command[0] === PI_BIN) {
+    execFile(PI_BIN, ['--version'], { timeout: 5000 }, (err, out) =>
       console.log(err ? `pi: version check failed (${(err as Error).message})` : `pi ${String(out).trim()}`));
   }
 });

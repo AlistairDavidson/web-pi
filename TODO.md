@@ -48,8 +48,6 @@ when it stabilises, build on pi-durable (is tmux still necessary with this?)
 
 Make app a PWA
 
-typed env vars - env.schema in astro.config.mjs → import from 'astro:env/server'
-
 validation-enhancer
 zod, astro/zod
 

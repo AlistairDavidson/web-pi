@@ -7,19 +7,17 @@
 // session would leave its unit looking "active".
 import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as path from 'node:path';
+import { ENV, RAW_ENV } from './env';
 import type { LiveSession } from './types';
 
-export const SOCKET = process.env.WEB_PI_TMUX_SOCKET ?? 'web-pi';
+export const SOCKET = ENV.WEB_PI_TMUX_SOCKET;
 export const NAME_RE = /^[a-zA-Z0-9_-]{1,40}$/;
 
 // In-project tmux config, applied when the tmux server starts. `-f` is read
 // at server start only; carrying it on every call is a no-op afterwards and
 // guarantees whichever call boots the server (first new-session) uses it.
-// dist-server/src/lib/tmux.js → app root is three levels up.
-const CONF = process.env.WEB_PI_TMUX_CONF
-  ?? path.join(__dirname, '..', '..', '..', 'tmux.conf');
-if (process.env.WEB_PI_TMUX_CONF && !fs.existsSync(CONF)) {
+const CONF = ENV.WEB_PI_TMUX_CONF;
+if (RAW_ENV.WEB_PI_TMUX_CONF && !fs.existsSync(CONF)) {
   console.warn(`WEB_PI_TMUX_CONF=${CONF} does not exist — using tmux defaults`);
 }
 

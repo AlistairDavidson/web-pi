@@ -3,10 +3,10 @@
 //   npm run set-password   (or: node dist-server/server/set-password.js)
 // Piped:  printf 'user\npass\npass\n' | node dist-server/server/set-password.js
 import * as readline from 'node:readline';
-import * as path from 'node:path';
 import { writeCred } from '../src/lib/auth';
+import { ENV } from '../src/lib/env';
 
-const authFile = process.env.WEB_PI_AUTH_FILE ?? path.join(__dirname, '..', '..', 'auth.json');
+const authFile = ENV.WEB_PI_AUTH_FILE;
 
 // Interactive prompt (TTY): prompt printed BEFORE muting output (else the
 // prompt itself is swallowed and it looks hung — fixed 2026-09-30).

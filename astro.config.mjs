@@ -1,6 +1,11 @@
 import { defineConfig } from 'astro/config';
 import node from '@astrojs/node';
 import lit from '@awesome.me/astro-lit';
+// Typed env-var contract for every WEB_PI_* variable the server reads —
+// the single source of truth, shared with src/lib/env.ts (the compiled
+// server's typed reads; see that file for why the server cannot import
+// 'astro:env/server' directly). Plain data in envField() output shape.
+import { envSchema } from './src/lib/env-schema';
 
 // SSR build: Astro renders pages on demand (middleware-mode handler), the
 // compiled Node server (dist-server/) calls into it for page routes and
@@ -38,6 +43,12 @@ export default defineConfig({
   base,
   srcDir: './src',
   outDir: './dist', // dist/client (assets) + dist/server/entry.mjs (SSR handler)
+  env: {
+    // All server-context secrets: Astro reads these from process.env at
+    // runtime. (public would inline build-time values into the SSR bundle —
+    // wrong for vars the operator sets when starting the built server.)
+    schema: envSchema,
+  },
   // trailingSlash 'ignore' — the Node server decides what / and /login map to.
   vite: { server: { proxy: devProxy } },
 });

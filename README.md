@@ -104,7 +104,15 @@ if you run the API half elsewhere.
 ## Configuration (environment)
 
 Everything is env-configured; defaults suit a single-user Linux box running
-`pi` as the same user as the server.
+`pi` as the same user as the server. The `WEB_PI_*` contract is declared
+once, typed, in a schema shared by Astro and the Node server:
+`astro.config.mjs`'s `env.schema` (imported from `src/lib/env-schema.ts`)
+declares every variable — names, types, and the static defaults — and the
+compiled server reads the same schema through `src/lib/env.ts` (the typed
+runtime equivalent of `astro:env/server` for a plain-tsc build; see the
+comments there for why the server can't import the Astro virtual module
+directly). Defaults that must be computed at boot (homedir, app-root paths,
+the vendored-pi probe) live beside the reads in `src/lib/env.ts`.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -226,7 +234,8 @@ when they modify the app on the server (the rollback TODO builds on this).
   `<agent-terminal>` (xterm.js island); each static shell is SSR'd by an
   Astro wrapper (`ConsoleApp.astro`, `AgentTerminal.astro`)
 - `src/lib` — shared strict TS: auth (scrypt + sessions + rate limiter),
-  tmux helpers, pi session-store parser, wire types
+  tmux helpers, pi session-store parser, wire types, typed env schema +
+  reads (`env-schema.ts` / `env.ts`, the `WEB_PI_*` contract)
 - `server` — the Node server: Astro SSR (middleware) + assets + REST + WS → node-pty → tmux
 - `pi/` — the controlled pi agent-dir template (settings, MCPs, skills,
   extensions) seeded into the runtime dir; `tmux.conf` at the root is the
