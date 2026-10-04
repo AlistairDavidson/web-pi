@@ -38,6 +38,9 @@ tmux socket ── session per tab ── pi ── ~/.pi/agent/sessions/
   timers: name + `OnCalendar` schedule + arbitrary shell command. Every
   run — timer-fired or "run now" — opens in a tmux session on the app's
   socket, so it shows up in Live and is attachable like any session.
+- **Settings** — `/settings`: read-only dashboard of the effective config
+  (listen address, paths, versions) plus one action, a manual update-pi
+  button.
 - **Single-user login** — username + password, salted scrypt hash in a
   local file, `HttpOnly`/`Secure`/`SameSite=Strict` session cookie. No
   account machinery. Fails closed until the credential exists.
@@ -235,12 +238,21 @@ boundary). The original deployment shape still applies — nginx at a
 docker compose exec webpi npm install @earendil-works/pi-coding-agent@latest
 ```
 
+Or click **update pi** on `/settings`: the server runs that same
+`npm install …@latest` in the app's install dir, shows the captured npm
+output and the resulting version, and asks you to restart the server.
+Concurrent updates are refused; npm missing from the server's PATH is
+reported instead of installed-around. Same caveat below either way.
+
 Stay within the `^1` range web-pi declares (its session-listing and resume
 code is written against that major). New sessions pick the new binary up
 immediately — pi is exec'd per session, nothing restarts; running sessions
 finish on the old one. The boot log and `/api/state` confirm what's live.
 Note: an app-image sync (below) re-pins pi to the lockfile — re-apply
-afterwards if you want the newer one.
+afterwards if you want the newer one. In the **docker dev profile**
+`node_modules` is a shadow volume and `npm install` re-runs from the
+lockfile on every boot, so an update made in place (button or `exec`) does
+not persist there.
 
 **App code:** rebuild + `up -d`. The entrypoint hashes the image's source
 tree; on change it syncs app files into the existing volume while volume

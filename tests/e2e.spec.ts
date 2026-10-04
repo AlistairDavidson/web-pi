@@ -341,6 +341,42 @@ test('search filters the past-session list and survives the poll re-render', asy
   await expect(page.locator('session-sidebar li[data-resume]')).toHaveCount(1);
 });
 
+test('unauthenticated /settings serves the login page; settings APIs stay guarded', async ({ page, request }) => {
+  await page.goto('/settings');
+  await expect(page.locator('wa-input#username input')).toHaveCount(1);
+  expect((await request.get('/api/settings')).status()).toBe(401);
+  expect((await request.post('/api/update-pi', { data: {} })).status()).toBe(401);
+});
+
+test('settings dashboard shows effective config; update dry-run is check-only', async ({ page }) => {
+  await login(page);
+  // The console header's gear link is the way in.
+  await expect(page.locator('.nav-actions wa-button[href$="/settings"]')).toBeVisible();
+  await page.goto('/settings');
+
+  const cfg = page.locator('#config');
+  await expect(cfg.locator('.cfg-row')).toHaveCount(12);
+  const text = await cfg.innerText();
+  expect(text).toContain('web-pi-itest');             // tmux socket (config env)
+  expect(text).toContain('cmd.sh');                   // session command
+  expect(text).toContain('/tmp/web-pi-itest/sessions'); // sessions dir
+  expect(text).toContain('/tmp/web-pi-itest/auth.json'); // auth file path — path only, never contents
+  await expect(page.locator('#pi-badge')).toContainText(/pi /);
+  await expect(page.locator('#pi-declared')).toContainText('declared');
+
+  // Check-only dry-run through the authed page — installs nothing.
+  const dry = await page.evaluate(async () => {
+    const r = await fetch('/api/update-pi', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"dryRun":true}',
+    });
+    return { status: r.status, body: await r.json() };
+  });
+  expect(dry.status).toBe(200);
+  expect(dry.body.ok).toBe(true);
+  expect(dry.body.dryRun).toBe(true);
+  expect(dry.body.output).toContain('would run');
+});
+
 test('login rate limit kicks in (10 per 15 min per IP)', async ({ request }) => {
   // Runs last: earlier tests already spent part of the shared budget.
   let saw429 = false;
