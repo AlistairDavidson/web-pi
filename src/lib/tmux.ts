@@ -2,9 +2,12 @@
 // The app owns ONE socket (default "web-pi"): the tmux server starts on
 // first new-session and dies with the last session (exit-empty). Closing
 // the browser tab detaches; sessions keep running under tmux.
-// Pattern note: anything that must be systemd-supervised should get its
+// Pattern note: a LONG-LIVED systemd-supervised session should get its
 // OWN socket + unit — never share this one, or a crashing supervised
-// session would leave its unit looking "active".
+// session would leave its unit looking "active". Scheduled-job runs are
+// the sanctioned exception (src/lib/jobs.ts): their units are oneshots
+// that exit with the run, and sharing this socket is precisely what makes
+// runs appear in the Live list next to interactive sessions.
 import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
 import { ENV, RAW_ENV } from './env';

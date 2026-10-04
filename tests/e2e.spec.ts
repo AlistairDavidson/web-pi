@@ -193,12 +193,15 @@ test('terminal fills the available space and refits when it shrinks', async ({ p
   expect(await termRows(page)).toBeLessThan(rowsBefore);
 });
 
-// jobs (scheduled jobs, systemd user units): the suite's hermetic
-// container has no `systemctl --user`, so the CRUD flow can't run there.
-// What runs everywhere without systemd is the degraded-mode contract:
-// the /jobs page shows an explanatory notice and the API answers
-// 200/503 — never a stack of 500s. On a host with a working user session
-// this skips (CRUD coverage needs the real backend).
+// jobs (scheduled jobs, systemd user units): the suite must pass both
+// with and without a reachable `systemctl --user` (CI containers and
+// Docker deploys have none). What runs everywhere is the degraded-mode
+// contract: the /jobs page shows an explanatory notice and the API
+// answers 200/503 — never a stack of 500s. On a host with a working user
+// session (e.g. a dev box) degraded mode isn't reachable — the server
+// would find systemctl usable — so the test skips there; full CRUD needs
+// the real backend. To force degraded mode on such a host, point
+// WEB_PI_SYSTEMCTL at a stub binary when booting the server.
 const systemdUserSession = (() => {
   try {
     execFileSync('systemctl', ['--user', 'show-environment'], { stdio: 'ignore' });
