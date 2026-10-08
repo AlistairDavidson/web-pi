@@ -27,17 +27,22 @@ export class Auth {
     catch { return null; }
   }
 
-  verify(username: string, password: string): boolean {
+  /** Async scrypt: the hash runs on the libuv threadpool, so login attempts
+   *  never stall the event loop (and every attached terminal with it). The
+   *  hash runs even when the username is wrong — skipping it would make a
+   *  wrong username measurably faster than a wrong password. */
+  async verify(username: string, password: string): Promise<boolean> {
     const cred = this.readCred();
     if (!cred) return false;
     const uBuf = Buffer.from(username, 'utf8');
     const uExpect = Buffer.from(cred.username, 'utf8');
     const uOk = uBuf.length === uExpect.length && crypto.timingSafeEqual(uBuf, uExpect);
-    if (!uOk) return false;
     const expect = Buffer.from(cred.hash, 'hex');
-    const got = crypto.scryptSync(password, Buffer.from(cred.salt, 'hex'),
-      SCRYPT.keylen, SCRYPT);
-    return expect.length === got.length && crypto.timingSafeEqual(expect, got);
+    const got = await new Promise<Buffer>((resolve, reject) =>
+      crypto.scrypt(password, Buffer.from(cred.salt, 'hex'), SCRYPT.keylen, SCRYPT,
+        (err, key) => (err ? reject(err) : resolve(key))));
+    const pOk = expect.length === got.length && crypto.timingSafeEqual(expect, got);
+    return uOk && pOk;
   }
 
   newSession(): string {
@@ -79,15 +84,31 @@ export class Auth {
 /** Tiny per-IP fixed-window limiter. Counters live in memory. */
 export class RateLimiter {
   private buckets = new Map<string, { count: number; reset: number }>();
-  constructor(private max: number, private windowMs: number) {}
+  constructor(private max: number, private windowMs: number, private cap = 10000) {}
   allow(ip: string): boolean {
     const now = Date.now();
     let b = this.buckets.get(ip);
-    if (!b || now > b.reset) { b = { count: 0, reset: now + this.windowMs }; this.buckets.set(ip, b); }
+    if (!b || now > b.reset) {
+      if (b) this.buckets.delete(ip); // re-insert: Map order stays oldest-window-first
+      b = { count: 0, reset: now + this.windowMs };
+      this.buckets.set(ip, b);
+      if (this.buckets.size > this.cap) this.evict(now);
+    }
     if (b.count >= this.max) return false;
     b.count++;
-    if (this.buckets.size > 10000) this.buckets.clear(); // paranoia cap
     return true;
+  }
+  /** Memory cap: drop expired windows, then the oldest ones. Never a bulk
+   *  clear — that would hand every limited IP a fresh budget. */
+  private evict(now: number): void {
+    for (const [ip, b] of this.buckets) {
+      if (this.buckets.size <= this.cap) return;
+      if (now > b.reset) this.buckets.delete(ip);
+    }
+    for (const ip of this.buckets.keys()) {
+      if (this.buckets.size <= this.cap) return;
+      this.buckets.delete(ip);
+    }
   }
 }
 

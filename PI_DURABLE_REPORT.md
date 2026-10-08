@@ -33,7 +33,7 @@ Maturity: explicitly **experimental** — the README's first line is *"The API c
 
 Four distinct jobs:
 
-1. **Process host** — keeps pi alive when the browser tab (or our Node server) goes away; the tmux server is a separate daemon, so a web-pi crash doesn't touch sessions.
+1. **Process host** — keeps pi alive when the browser tab (or our Node server) goes away; on a bare host the tmux server is a separate daemon, so a web-pi crash doesn't touch sessions. In the container it doesn't hold: the Node server is init's only child, so when it exits the container stops and tmux goes with it.
 2. **Attach/detach multiplexer** — live attach via `attach -d`; planned `capture-pane` scrollback backfill on attach.
 3. **Terminal backend** — the medium for pi's TUI itself: scrollback, resize, the thing xterm.js talks to through node-pty.
 4. **Generic process runner** — `WEB_PI_COMMAND` can be any CLI; the TODO's Zed-webapp / raw-terminal / app-preview tabs need this too.

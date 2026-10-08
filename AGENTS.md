@@ -11,7 +11,12 @@ exist in ~/.cache/ms-playwright). Fully hermetic: the config boots
 auth file, fixture pi sessions, dedicated `web-pi-itest` tmux socket, a
 deterministic `cmd.sh` session command). Tests must stay serial
 (workers: 1): they share the per-IP login rate-limit budget and the tmux
-socket, and the rate-limit test must run last. Build first (`npm run build`)
+socket, and the rate-limit test must run last. `login()` signs in through
+the form once and reuses that cookie, which keeps the suite inside the
+budget (10 / 15 min), so use it in new tests rather than signing in again.
+For authenticated API calls use in-page `fetch` (`page.evaluate`), not
+`page.request`: Playwright's API client doesn't send the `Secure` session
+cookie over the suite's plain-http origin. Build first (`npm run build`)
 or let global-setup do it when dist/ is missing.
 
 ## Web Awesome (wa-*) components: SSR imports ≠ client imports

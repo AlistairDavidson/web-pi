@@ -24,7 +24,9 @@ tmux socket ── session per tab ── pi ── ~/.pi/agent/sessions/
 ## What you get
 
 - **New session** — a tmux session running `pi` (command configurable);
-  closing the browser tab detaches, the session keeps running.
+  closing the browser tab detaches, the session keeps running. A dropped
+  connection (proxy idle timeout, server restart, network blip) reattaches
+  to the same tmux session on its own, with backoff.
 - **Sessions** — past pi sessions parsed from pi's session store
   (`~/.pi/agent/sessions` by default), grouped by working directory, newest
   first. Click to resume: starts `pi --session <id>` at the session's
@@ -120,17 +122,21 @@ Everything is env-configured; defaults suit a single-user Linux box running
 `pi` as the same user as the server. The `WEB_PI_*` contract is declared
 once, typed, in a schema shared by Astro and the Node server:
 `astro.config.mjs`'s `env.schema` (imported from `src/lib/env-schema.ts`)
-declares every variable — names, types, and the static defaults — and the
-compiled server reads the same schema through `src/lib/env.ts` (the typed
-runtime equivalent of `astro:env/server` for a plain-tsc build; see the
-comments there for why the server can't import the Astro virtual module
-directly). Defaults that must be computed at boot (homedir, app-root paths,
-the vendored-pi probe) live beside the reads in `src/lib/env.ts`.
+declares every runtime variable — names, types, and the static defaults —
+and the compiled server reads the same schema through `src/lib/env.ts` (the
+typed runtime equivalent of `astro:env/server` for a plain-tsc build; see
+the comments there for why the server can't import the Astro virtual module
+directly). Number variables that aren't integers stop the server at boot.
+Defaults that must be computed at boot (homedir, app-root paths, the
+vendored-pi probe) live beside the reads in `src/lib/env.ts`. The one
+exception is the dev-only `WEB_PI_DEV_API`, which `astro.config.mjs` reads
+directly.
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `WEB_PI_HOST` | `127.0.0.1` | Listen address (loopback + reverse proxy is the intended shape) |
 | `WEB_PI_PORT` | `3000` | Listen port |
+| `WEB_PI_TRUST_PROXY` | `0` | Reverse-proxy hops in front of the server (nginx = `1`, ALB → nginx = `2`). The login/WS rate limits key on the client IP that many entries from the right of `X-Forwarded-For`; `0` ignores the header and uses the socket peer. Set it to match your proxies: too low and every client shares the proxy's bucket, too high and clients can pick their own |
 | `WEB_PI_BASE` | `/` | URL base path, e.g. `/console` when riding an existing site. **Baked into the pages at build time** — set it before `npm run build` *and* at runtime |
 | `WEB_PI_HOME` | `os.homedir()` | `HOME` for spawned processes (tmux, pi) |
 | `WEB_PI_AGENT_DIR` | `<app root>/.pi-agent` | runtime pi agent dir (config, credentials, sessions for spawned pi) — seeded from the repo's `pi/` template where absent (a stray `PI_CODING_AGENT_DIR` in the server's env is ignored with an error logged) |
@@ -222,7 +228,9 @@ docker compose up -d        # loopback :3000, app on the named volume webpi-app
 Front it with TLS — [`deploy/`](deploy/) has:
 
 - `nginx-webpi.conf` — TLS reverse proxy with the WebSocket upgrade map
-  (upstream is the published loopback port)
+  (upstream is the published loopback port). One proxy hop, so the server
+  runs with `WEB_PI_TRUST_PROXY=1` (compose sets it; set it yourself for a
+  host install behind nginx)
 - fail2ban filter + jail watching the nginx access log for failed logins
 
 The old systemd unit is gone: the container *is* the unit (restart policy
@@ -239,15 +247,16 @@ docker compose exec webpi npm install @earendil-works/pi-coding-agent@latest
 ```
 
 Or click **update pi** on `/settings`: the server runs that same
-`npm install …@latest` in the app's install dir, shows the captured npm
-output and the resulting version, and asks you to restart the server.
+`npm install …@latest` in the app's install dir and shows the captured npm
+output and the resulting version. No restart is needed (see below).
 Concurrent updates are refused; npm missing from the server's PATH is
 reported instead of installed-around. Same caveat below either way.
 
 Stay within the `^1` range web-pi declares (its session-listing and resume
 code is written against that major). New sessions pick the new binary up
 immediately — pi is exec'd per session, nothing restarts; running sessions
-finish on the old one. The boot log and `/api/state` confirm what's live.
+finish on the old one. `/settings` shows the installed version; the boot
+log shows the one installed when the server started.
 Note: an app-image sync (below) re-pins pi to the lockfile — re-apply
 afterwards if you want the newer one. In the **docker dev profile**
 `node_modules` is a shadow volume and `npm install` re-runs from the
@@ -279,7 +288,11 @@ when they modify the app on the server (the rollback TODO builds on this).
 - The terminal **is** the product: anyone with the session cookie can type
   into a shell as the app user. One user, strong password, TLS, fail2ban,
   loopback bind + reverse proxy. Rate limits: 10 login POSTs / 15 min / IP,
-  30 WS connections / min / IP (in-memory).
+  30 WS connections / min / IP (in-memory), where the IP is the socket peer
+  or, behind proxies, the `X-Forwarded-For` hop `WEB_PI_TRUST_PROXY`
+  selects — never the client-supplied leftmost entry. Password hashing runs
+  off the event loop, at most 4 at once (more get 503), so a login flood
+  can't stall attached terminals.
 - Auth fails closed: no credential file → no login possible.
 - Static assets are served from a fixed route table with traversal checks;
   request bodies are size-capped.

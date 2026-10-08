@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { writeCred } from '../src/lib/auth';
-import { MARKER, PASSWORD, TMUX_SOCKET, USERNAME, WORKSPACE } from './env';
+import { MARKER, PASSWORD, TMUX_SOCKET, USERNAME, UUIDV7_SIBLINGS, WORKSPACE } from './env';
 
 export default function globalSetup(): void {
   fs.rmSync(WORKSPACE, { recursive: true, force: true });
@@ -39,6 +39,10 @@ export default function globalSetup(): void {
     '/home/tester/proj-alpha', 'refactor the tmux helpers', 24 * 60);
   mkSession('srv', '33333333-3333-3333-3333-333333333333',
     '/srv/app', 'deploy checklist review', 7 * 24 * 60);
+  // Same cwd as alpha and aged between it and srv, so the sidebar still
+  // shows exactly two cwd groups.
+  mkSession('alpha', UUIDV7_SIBLINGS[0], '/home/tester/proj-alpha', 'uuidv7 sibling one', 2 * 24 * 60);
+  mkSession('alpha', UUIDV7_SIBLINGS[1], '/home/tester/proj-alpha', 'uuidv7 sibling two', 3 * 24 * 60);
 
   // Kill any leftover test tmux server from a previous aborted run.
   try { execFileSync('tmux', ['-L', TMUX_SOCKET, 'kill-server'], { stdio: 'ignore' }); }

@@ -60,6 +60,7 @@ const CFG = {
   newSessionCwd: ENV.WEB_PI_NEW_SESSION_CWD,
   // whitespace-split command line; resume appends --session <id> (pi-family CLI)
   command: ENV.WEB_PI_COMMAND.trim().split(/\s+/).filter(Boolean),
+  trustProxy: Math.max(0, ENV.WEB_PI_TRUST_PROXY),
 };
 
 /** Seed the runtime agent dir from the versioned template, only where the
@@ -107,9 +108,14 @@ const route = (p: string): string => (CFG.base === '/' ? p : CFG.base + p);
 const auth: AuthType = new Auth(CFG.authFile);
 // Hide-from-list state for past sessions; ids in a JSON file next to the
 // auth file (WEB_PI_HIDDEN_FILE to move). pi's session store is untouched.
-const hiddenSessions = new HiddenSessions(CFG.authFile);
+const hiddenSessions = new HiddenSessions(ENV.WEB_PI_HIDDEN_FILE);
 const loginLimiter = new RateLimiter(10, 15 * 60 * 1000);
 const wsLimiter = new RateLimiter(30, 60 * 1000);
+// Password hashes in flight at once. Each scrypt holds 16 MiB and a libuv
+// threadpool thread (4 by default, shared with fs) — past this, logins get
+// 503 instead of queueing without bound.
+const MAX_LOGIN_VERIFY = 4;
+let loginVerifying = 0;
 
 // ---------- helpers ----------
 const MIME: Record<string, string> = {
@@ -145,18 +151,42 @@ function sendClientFile(res: http.ServerResponse, rel: string, cache: boolean): 
     res.end(data);
   });
 }
+/** JSON request body, capped at 10 KiB. Anything but a JSON object (array,
+ *  string, null, …) is a bad request, so handlers can read fields freely. */
 function readBody(req: http.IncomingMessage, cb: (err: Error | null, body?: Record<string, unknown>) => void): void {
   let n = 0; const chunks: Buffer[] = [];
   req.on('data', (c: Buffer) => { n += c.length; if (n > 10240) { req.destroy(); return; } chunks.push(c); });
   req.on('end', () => {
-    try { cb(null, JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as Record<string, unknown>); }
-    catch { cb(new Error('bad json')); }
+    let body: unknown;
+    try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); }
+    catch { cb(new Error('bad json')); return; }
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) { cb(new Error('not an object')); return; }
+    cb(null, body as Record<string, unknown>); // outside the try: a throwing handler must not be re-called
   });
 }
+/** Client IP for the rate limiters. X-Forwarded-For is client-controlled
+ *  except for the entries our own proxies appended (nginx's
+ *  $proxy_add_x_forwarded_for and ALB both append), so with
+ *  WEB_PI_TRUST_PROXY=N the client is the Nth entry from the right — never
+ *  the leftmost, which anyone can set to get a fresh bucket per request.
+ *  N=0 (default): the header is ignored and the socket peer is the client. */
 function ipOf(req: http.IncomingMessage): string {
+  const peer = req.socket.remoteAddress ?? '?';
+  if (CFG.trustProxy === 0) return peer;
   const xff = req.headers['x-forwarded-for'];
-  const raw: string = (Array.isArray(xff) ? xff[0] : xff) ?? req.socket.remoteAddress ?? '?';
-  return raw.split(',')[0]!.trim();
+  const hops = (Array.isArray(xff) ? xff.join(',') : xff ?? '')
+    .split(',').map(h => h.trim()).filter(Boolean);
+  if (hops.length === 0) return peer; // reached us without passing the proxy
+  return hops[Math.max(0, hops.length - CFG.trustProxy)]!;
+}
+/** decodeURIComponent that answers null instead of throwing on malformed
+ *  escapes (`%E0`) — a throw in the request handler takes the process down. */
+function decodeSegment(s: string): string | null {
+  try { return decodeURIComponent(s); } catch { return null; }
+}
+/** Is this path inside the app's base ('/foo' and '/foo/…', or anything for '/')? */
+function underBase(url: string): boolean {
+  return CFG.base === '/' || url === CFG.base || url.startsWith(CFG.base + '/');
 }
 function authed(req: http.IncomingMessage): boolean {
   return auth.valid(Auth.parseCookies(req.headers.cookie).webpi_session);
@@ -183,7 +213,18 @@ function renderAstro(req: http.IncomingMessage, res: http.ServerResponse): void 
 }
 
 // ---------- HTTP ----------
+// Last-resort guard: a synchronous throw in a route must cost one 500, not
+// the process (and, in the container, every tmux session with it). Inputs
+// are validated in the routes; this only catches what slips through.
 const server = http.createServer((req, res) => {
+  try { handle(req, res); }
+  catch (err) {
+    console.error('request handler error', err);
+    if (!res.headersSent) send(res, 500, 'internal error'); else res.destroy();
+  }
+});
+
+function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
   const url = (req.url ?? '').split('?')[0]!;
 
   if (req.method === 'POST' && url === route('/login')) {
@@ -191,12 +232,22 @@ const server = http.createServer((req, res) => {
     readBody(req, (err, body) => {
       if (err) { send(res, 400, 'bad request'); return; }
       const username = body?.username, password = body?.password;
-      if (typeof username !== 'string' || typeof password !== 'string' ||
-        !auth.verify(username, password)) {
+      if (typeof username !== 'string' || typeof password !== 'string') {
         send(res, 401, 'invalid credentials'); // nginx logs it; fail2ban watches
         return;
       }
-      send(res, 200, 'ok', { 'Set-Cookie': auth.cookieHeader(auth.newSession(), CFG.base) });
+      if (loginVerifying >= MAX_LOGIN_VERIFY) {
+        send(res, 503, 'busy, try again', { 'Retry-After': '1' });
+        return;
+      }
+      loginVerifying++;
+      auth.verify(username, password)
+        .then(ok => {
+          if (!ok) { send(res, 401, 'invalid credentials'); return; }
+          send(res, 200, 'ok', { 'Set-Cookie': auth.cookieHeader(auth.newSession(), CFG.base) });
+        })
+        .catch(e => { console.error('login verify failed', e); send(res, 500, 'internal error'); })
+        .finally(() => { loginVerifying--; });
     });
     return;
   }
@@ -222,23 +273,24 @@ const server = http.createServer((req, res) => {
 
   // Everything below requires a valid session...
   if (!authed(req)) {
-    // ...except the login page + its hashed assets (every data/terminal
-    // route stays 401), the PWA offline shell (static, session-free —
-    // the service worker precaches it at install time, pre-auth), and the
-    // /settings dashboard (same gate as the shell: login first).
+    // ...except the PWA offline shell (static, session-free — the service
+    // worker precaches it at install time, pre-auth), the hashed assets,
+    // and the login page itself. Every data/terminal route stays 401.
     if (req.method === 'GET' && url === route('/offline')) {
-      renderAstro(req, res);
-      return;
-    }
-    if (req.method === 'GET' &&
-        (url === CFG.base || url === CFG.base + '/' || url === route('/login') ||
-         url === route('/settings'))) {
-      req.url = route('/login'); // render the login page whatever the shell URL
       renderAstro(req, res);
       return;
     }
     if (req.method === 'GET' && url.startsWith(route('/_astro/'))) {
       sendClientFile(res, url.slice(CFG.base.length), true);
+      return;
+    }
+    // Any other page GET under the base (/, /jobs, /settings, a typo'd
+    // path, …) renders the login page in place — the address bar keeps
+    // the URL, so signing in reloads straight into the page that was asked
+    // for. No per-page allowlist to forget when a page is added.
+    if (req.method === 'GET' && underBase(url) && !url.startsWith(route('/api/'))) {
+      req.url = route('/login');
+      renderAstro(req, res);
       return;
     }
     send(res, 401, 'unauthorized');
@@ -306,12 +358,16 @@ const server = http.createServer((req, res) => {
     }
     const runNow = sub.match(/^\/([^/]+)\/run$/);
     if (req.method === 'POST' && runNow) {
-      jobs.runJob(decodeURIComponent(runNow[1]!)).then(reply).catch(fail);
+      const name = decodeSegment(runNow[1]!);
+      if (name === null) { send(res, 400, 'bad job name'); return; }
+      jobs.runJob(name).then(reply).catch(fail);
       return;
     }
     const remove = sub.match(/^\/([^/]+)$/);
     if (req.method === 'DELETE' && remove) {
-      jobs.deleteJob(decodeURIComponent(remove[1]!)).then(reply).catch(fail);
+      const name = decodeSegment(remove[1]!);
+      if (name === null) { send(res, 400, 'bad job name'); return; }
+      jobs.deleteJob(name).then(reply).catch(fail);
       return;
     }
     send(res, 404, 'not found');
@@ -401,7 +457,7 @@ const server = http.createServer((req, res) => {
   }
 
   send(res, 404, 'not found');
-});
+}
 
 // ---------- WebSocket → node-pty → tmux attach ----------
 const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
@@ -422,6 +478,35 @@ interface Pty { write(d: string): void; resize(c: number, r: number): void; kill
 function wsSend(ws: WebSocket, msg: ServerMsg): void {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
 }
+
+/** A client frame checked against the ClientMsg shapes — null for anything
+ *  else (bad JSON, `null`, arrays, missing/mistyped fields). The types in
+ *  types.ts are only a promise about well-behaved clients. */
+function parseClientMsg(raw: string): ClientMsg | null {
+  let v: unknown;
+  try { v = JSON.parse(raw); } catch { return null; }
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return null;
+  const m = v as Record<string, unknown>;
+  switch (m.type) {
+    case 'input':
+      return typeof m.data === 'string' ? { type: 'input', data: m.data } : null;
+    case 'resize':
+      return typeof m.cols === 'number' && typeof m.rows === 'number'
+        ? { type: 'resize', cols: m.cols, rows: m.rows } : null;
+    case 'attach':
+      if (m.mode === 'live' && typeof m.target === 'string') return { type: 'attach', mode: 'live', target: m.target };
+      if (m.mode === 'resume' && typeof m.id === 'string') return { type: 'attach', mode: 'resume', id: m.id };
+      return null;
+    default:
+      return null;
+  }
+}
+
+// Keepalive: a ping per connection this often. Idle-timeout proxies (ALB
+// defaults to 60s; nginx's proxy_read_timeout) count it as traffic, so a
+// terminal sitting at pi's prompt isn't cut; a ping unanswered by the next
+// tick means the peer is gone — terminate, and the pty is reaped.
+const PING_INTERVAL_MS = 30_000;
 
 function attach(ws: WebSocket): void {
   let p: Pty | null = null;
@@ -451,41 +536,59 @@ function attach(ws: WebSocket): void {
     return true;
   }
 
-  ws.on('message', raw => {
-    if (raw == null) return;
-    let msg: ClientMsg; try { msg = JSON.parse(Buffer.from(raw as Buffer).toString('utf8')) as ClientMsg; } catch { return; }
-    if (msg.type === 'input' && p) {
-      p.write(msg.data.slice(0, 4096));
+  function onMessage(msg: ClientMsg): void {
+    if (msg.type === 'input') {
+      // Written whole: the client splits big pastes into consecutive input
+      // frames (agent-terminal.ts), and maxPayload bounds any one frame.
+      if (p) p.write(msg.data);
     } else if (msg.type === 'resize') {
-      const c = Math.min(Math.max(parseInt(String(msg.cols), 10) || 80, 10), 500);
-      const r = Math.min(Math.max(parseInt(String(msg.rows), 10) || 24, 4), 200);
+      const c = Math.min(Math.max(Math.trunc(msg.cols) || 80, 10), 500);
+      const r = Math.min(Math.max(Math.trunc(msg.rows) || 24, 4), 200);
       size = { cols: c, rows: r };
       if (p) { try { p.resize(c, r); } catch { /* race on exit */ } }
     } else if (msg.type === 'attach' && !p) {
       if (msg.mode === 'live') {
-        const target = String(msg.target ?? '');
+        const target = msg.target;
         if (!tmux.NAME_RE.test(target)) { wsSend(ws, { type: 'error', message: 'bad target' }); return; }
         tmux.hasSession(target, (_e, exists) => {
           if (!exists) { wsSend(ws, { type: 'error', message: 'no such live session' }); return; }
           spawnTmux([target], target);
         });
-      } else if (msg.mode === 'resume') {
-        const found = findSession(CFG.sessionsDir, String(msg.id ?? ''));
+      } else {
+        const found = findSession(CFG.sessionsDir, msg.id);
         if (!found) { wsSend(ws, { type: 'error', message: 'no such session' }); return; }
         let cwd = CFG.newSessionCwd;
         if (found.cwd) {
           try { if (fs.statSync(found.cwd).isDirectory()) cwd = found.cwd; } catch { /* fallback */ }
         }
-        const short = 'r-' + found.id.slice(0, 8);
-        tmux.resumeSession(short, cwd, CFG.command, found.id, sessionEnv, err => {
+        const name = tmux.resumeSessionName(found.id);
+        tmux.resumeSession(name, cwd, CFG.command, found.id, sessionEnv, err => {
           if (err) { wsSend(ws, { type: 'error', message: 'could not start resume session' }); return; }
-          spawnTmux([short], short);
+          spawnTmux([name], name);
         });
       }
     }
+  }
+
+  ws.on('message', raw => {
+    const msg = parseClientMsg(Buffer.from(raw as Buffer).toString('utf8'));
+    if (!msg) return; // malformed frames are dropped, never thrown on
+    try { onMessage(msg); }
+    catch (err) { console.error('ws message handler error', err); }
   });
 
-  ws.on('close', () => { if (p) { try { p.kill(); } catch { /* already gone */ } } });
+  let alive = true;
+  ws.on('pong', () => { alive = true; });
+  const keepalive = setInterval(() => {
+    if (!alive) { ws.terminate(); return; }
+    alive = false;
+    try { ws.ping(); } catch { /* closing */ }
+  }, PING_INTERVAL_MS);
+
+  ws.on('close', () => {
+    clearInterval(keepalive);
+    if (p) { try { p.kill(); } catch { /* already gone */ } }
+  });
   ws.on('error', () => { if (p) { try { p.kill(); } catch { /* noop */ } } });
 }
 

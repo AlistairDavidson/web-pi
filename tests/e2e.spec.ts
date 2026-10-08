@@ -5,8 +5,8 @@
 // Runs serially (workers: 1) — see playwright.config.ts.
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import { expect, test, type Page } from '@playwright/test';
-import { MARKER, PASSWORD, TMUX_SOCKET, USERNAME, WORKSPACE } from './env';
+import { expect, test, type Cookie, type Page } from '@playwright/test';
+import { MARKER, PASSWORD, TMUX_SOCKET, USERNAME, UUIDV7_SIBLINGS, WORKSPACE } from './env';
 
 const FIXTURE_A = '11111111-1111-1111-1111-111111111111';
 const FIXTURE_B = '22222222-2222-2222-2222-222222222222';
@@ -67,12 +67,27 @@ async function termRows(page: Page): Promise<number> {
   return (await termDims(page)).rows;
 }
 
-async function login(page: Page): Promise<void> {
-  await page.goto('/login');
+async function signIn(page: Page): Promise<void> {
   await page.fill('wa-input#username input', USERNAME);
   await page.fill('wa-input#password input', PASSWORD);
   await page.click('wa-button:has-text("sign in")');
-  await page.waitForURL(u => u.pathname === '/');
+}
+
+/** Lands on the signed-in console. The first call signs in through the
+ *  real login form; later calls reuse that session cookie — every
+ *  POST /login spends the per-IP budget (10 / 15 min) that the last test
+ *  exhausts on purpose. */
+let sessionCookie: Cookie | null = null;
+async function login(page: Page): Promise<void> {
+  if (sessionCookie) {
+    await page.context().addCookies([sessionCookie]);
+    await page.goto('/');
+  } else {
+    await page.goto('/login');
+    await signIn(page);
+    await page.waitForURL(u => u.pathname === '/');
+    sessionCookie = (await page.context().cookies()).find(c => c.name === 'webpi_session') ?? null;
+  }
   await page.waitForSelector('session-sidebar .nav');
 }
 
@@ -93,6 +108,9 @@ test('unauthenticated / serves the login page with upgraded wa-* controls', asyn
 
 test('API routes stay guarded without a session', async ({ request }) => {
   expect((await request.get('/api/state')).status()).toBe(401);
+  expect((await request.get('/api/jobs')).status()).toBe(401);
+  // Unknown API paths are 401 too — never the login page.
+  expect((await request.get('/api/nope')).status()).toBe(401);
   expect((await request.post('/api/session/hide', { data: { id: FIXTURE_A } })).status()).toBe(401);
   expect((await request.post('/api/session/unhide', { data: { id: FIXTURE_A } })).status()).toBe(401);
 });
@@ -123,7 +141,7 @@ test('login lands on the console with fixture sessions in the sidebar', async ({
   await expect(nav).toContainText('fix the login bug in auth module');
   await expect(nav).toContainText('refactor the tmux helpers');
   await expect(nav).toContainText('deploy checklist review');
-  // Sessions grouped by cwd: two groups across the three fixtures.
+  // Sessions grouped by cwd: two groups across the five fixtures.
   await expect(nav.locator('li.group')).toHaveCount(2);
 });
 
@@ -151,6 +169,116 @@ test('resume a past session from the sidebar', async ({ page }) => {
   await page.click(`session-sidebar li[data-resume="${FIXTURE_A}"]`);
   await expect(page.locator('.terminal-status.ok')).toContainText('attached', { timeout: 20_000 });
   await waitForTermText(page, MARKER);
+});
+
+test('resuming sessions whose ids share a prefix gives each its own tmux session', async ({ page }) => {
+  // pi ids are UUIDv7: the first 8 hex chars are a timestamp, so sessions
+  // started close together share them. Regression: resume named its tmux
+  // session r-<first 8 chars> and reused it, attaching the second resume
+  // to the first one's running pi.
+  const [one, two] = UUIDV7_SIBLINGS;
+  await login(page);
+  await page.click(`session-sidebar li[data-resume="${one}"]`);
+  await expect(page.locator('.terminal-status.ok')).toContainText(`attached: r-${one}`, { timeout: 20_000 });
+  await page.click(`session-sidebar li[data-resume="${two}"]`);
+  await expect(page.locator('.terminal-status.ok')).toContainText(`attached: r-${two}`, { timeout: 20_000 });
+
+  const names = execFileSync('tmux', ['-L', TMUX_SOCKET, 'list-sessions', '-F', '#{session_name}'],
+    { encoding: 'utf8' }).split('\n');
+  expect(names).toContain(`r-${one}`);
+  expect(names).toContain(`r-${two}`);
+});
+
+test('a paste bigger than one WebSocket frame reaches the session whole', async ({ page }) => {
+  test.setTimeout(60_000);
+  // > the server's 1 MiB maxPayload: only arrives if the client chunks it.
+  const size = 1_200_000;
+  const out = `${WORKSPACE}/paste.out`;
+  await login(page);
+  await page.fill('wa-input#new-name input', 'itest-paste');
+  await page.click('wa-button#new-btn');
+  await waitForTermText(page, MARKER, 20_000);
+
+  // Raw mode + no echo on the pane's tty so head sees the paste byte for
+  // byte (a canonical-mode line is capped at 4 KiB by the kernel, which
+  // would make this a test of the tty rather than of web-pi).
+  await page.locator('agent-terminal .terminal-container').click();
+  await page.keyboard.type(`stty raw -echo; echo RAW_$((40+2)); head -c ${size} > ${out}; stty sane\n`);
+  await waitForTermText(page, 'RAW_42');
+  await page.evaluate(n => {
+    const el = document.querySelector('agent-terminal') as unknown as { terminal: { paste(d: string): void } };
+    el.terminal.paste('x'.repeat(n));
+  }, size);
+
+  await expect.poll(() => {
+    try { return fs.statSync(out).size; } catch { return -1; }
+  }, { timeout: 30_000 }).toBe(size);
+  await expect(page.locator('.terminal-status.ok')).toContainText('attached: itest-paste');
+});
+
+test('a dropped socket reconnects to the same session; a session that ends is not retried', async ({ page }) => {
+  await login(page);
+  await page.fill('wa-input#new-name input', 'itest-reconnect');
+  await page.click('wa-button#new-btn');
+  await waitForTermText(page, MARKER, 20_000);
+  await expect(page.locator('.terminal-status.ok')).toContainText('attached: itest-reconnect');
+
+  // Drop the socket the way a proxy idle cut does: closed under the
+  // component, with no 'exit' from the server first.
+  await page.evaluate(() =>
+    (document.querySelector('agent-terminal') as unknown as { websocket: WebSocket }).websocket.close());
+  await expect(page.locator('.terminal-status')).toContainText('reconnecting');
+  await expect(page.locator('.terminal-status.ok')).toContainText('attached: itest-reconnect', { timeout: 10_000 });
+  await page.locator('agent-terminal .terminal-container').click();
+  await page.keyboard.type('echo BACK_$((40+2))\n');
+  await waitForTermText(page, 'BACK_42');
+
+  // The session itself ending arrives as the server's 'exit': reported,
+  // never reconnected (that would also loop two tabs bumping each other).
+  execFileSync('tmux', ['-L', TMUX_SOCKET, 'kill-session', '-t', 'itest-reconnect']);
+  await expect(page.locator('.terminal-status.info')).toContainText('detached: itest-reconnect');
+  await page.waitForTimeout(2500); // longer than the first reconnect backoff
+  await expect(page.locator('.terminal-status.info')).toContainText('detached: itest-reconnect');
+});
+
+test('malformed requests and frames are rejected without taking the server down', async ({ page }) => {
+  await login(page);
+  // In-page fetch, not page.request: Playwright's API client doesn't send
+  // the Secure session cookie over the suite's plain-http origin.
+  const status = (method: string, url: string, body?: string): Promise<number> =>
+    page.evaluate(async ([m, u, b]) => (await fetch(u!, {
+      method: m!, headers: { 'Content-Type': 'application/json' }, ...(b === undefined ? {} : { body: b }),
+    })).status, [method, url, body] as const);
+
+  // A bad %-escape in a path segment threw out of the request handler and
+  // killed the process; now it's a 400.
+  expect(await status('DELETE', '/api/jobs/%E0')).toBe(400);
+  expect(await status('POST', '/api/jobs/%E0/run')).toBe(400);
+  // JSON bodies must be objects.
+  expect(await status('POST', '/api/session/hide', '[]')).toBe(400);
+  expect(await status('POST', '/api/new', '"just a string"')).toBe(400);
+
+  // Junk WS frames — before and after attaching (`null` and a data-less
+  // input each used to crash the server) — are dropped; the socket lives on.
+  expect(await status('POST', '/api/new', '{"name":"itest-junk"}')).toBe(200);
+  const junk = ['null', '[]', '"x"', 'not json', '{"type":"input"}', '{"type":"input","data":5}',
+    '{"type":"resize","cols":"wide"}', '{"type":"attach","mode":"live"}', '{"type":"attach","mode":"resume","id":7}'];
+  const stillOpen = await page.evaluate(async frames => {
+    const ws = new WebSocket(`ws://${location.host}/ws`);
+    await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });
+    for (const f of frames) ws.send(f);
+    ws.send(JSON.stringify({ type: 'attach', mode: 'live', target: 'itest-junk' }));
+    await new Promise<void>(resolve => {
+      ws.onmessage = ev => { if ((JSON.parse(ev.data as string) as { type: string }).type === 'attached') resolve(); };
+    });
+    for (const f of frames) ws.send(f);
+    await new Promise(r => setTimeout(r, 300));
+    const open = ws.readyState === WebSocket.OPEN;
+    ws.close();
+    return open;
+  }, junk);
+  expect(stillOpen).toBe(true);
+  expect(await status('GET', '/api/state')).toBe(200);
 });
 
 test('attached session opens at the browser terminal\'s size, not 80x24', async ({ page }) => {
@@ -311,7 +439,7 @@ test('search filters the past-session list and survives the poll re-render', asy
 
   // Escape clears.
   await search.press('Escape');
-  await expect(page.locator('session-sidebar li[data-resume]')).toHaveCount(3);
+  await expect(page.locator('session-sidebar li[data-resume]')).toHaveCount(5);
 
   // A state poll re-render (the 15s interval, forced here) must not eat
   // the search box: value, focus and caret are restored.
@@ -339,6 +467,16 @@ test('search filters the past-session list and survives the poll re-render', asy
   expect(caretAfter).toBe(caretBefore);
   // The filter is still applied after the re-render.
   await expect(page.locator('session-sidebar li[data-resume]')).toHaveCount(1);
+});
+
+test('signed out, any page URL serves the login page and sign-in returns to it', async ({ page }) => {
+  // Regression: /jobs answered a bare "unauthorized" while / and /settings
+  // rendered the login page.
+  await page.goto('/jobs');
+  await expect(page.locator('wa-input#username input')).toHaveCount(1);
+  await signIn(page);
+  await expect(page.locator('jobs-app .jobs-main')).toBeVisible();
+  expect(new URL(page.url()).pathname).toBe('/jobs');
 });
 
 test('unauthenticated /settings serves the login page; settings APIs stay guarded', async ({ page, request }) => {
@@ -377,11 +515,18 @@ test('settings dashboard shows effective config; update dry-run is check-only', 
   expect(dry.body.output).toContain('would run');
 });
 
-test('login rate limit kicks in (10 per 15 min per IP)', async ({ request }) => {
+test('login rate limit kicks in (10 per 15 min per IP) and ignores a spoofed X-Forwarded-For', async ({ request }) => {
   // Runs last: earlier tests already spent part of the shared budget.
+  // Every attempt claims a different client IP. The server runs with
+  // WEB_PI_TRUST_PROXY unset (0), so the header must be ignored and every
+  // attempt counted against the real peer — regression: the leftmost XFF
+  // entry was trusted, so rotating it never hit 429.
   let saw429 = false;
   for (let i = 0; i < 15 && !saw429; i++) {
-    const r = await request.post('/login', { data: { username: USERNAME, password: 'nope' } });
+    const r = await request.post('/login', {
+      data: { username: USERNAME, password: 'nope' },
+      headers: { 'X-Forwarded-For': `203.0.113.${i + 1}` },
+    });
     if (r.status() === 429) saw429 = true;
   }
   expect(saw429).toBe(true);

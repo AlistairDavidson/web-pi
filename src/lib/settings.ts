@@ -1,7 +1,11 @@
 // settings.ts — backs the /settings dashboard: effective-config version
 // facts and the manual pi updater behind POST /api/update-pi.
 // `npm install @earendil-works/pi-coding-agent@latest` runs in the app's
-// install dir; the server must be restarted to serve the new binary.
+// install dir. No restart needed: the session command is the vendored
+// node_modules/.bin/pi, exec'd fresh per session, so new sessions get the
+// new version (running ones keep theirs). Only when the server booted
+// without a vendored pi (WEB_PI_COMMAND fell back to `pi` on PATH) does a
+// restart switch sessions over to it.
 import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -107,7 +111,7 @@ export function runPiUpdate(appRoot: string, dryRun: boolean,
         return;
       }
       console.log(`pi update: ${before ?? 'not installed'} → ${after ?? 'not installed'} ` +
-        `(restart the server to serve it)`);
+        `(new sessions use it)`);
       cb({ ok: true, dryRun, command, before, after, output });
     });
 }

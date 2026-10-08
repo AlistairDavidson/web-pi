@@ -9,6 +9,7 @@
 // that exit with the run, and sharing this socket is precisely what makes
 // runs appear in the Live list next to interactive sessions.
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import { ENV, RAW_ENV } from './env';
 import type { LiveSession } from './types';
@@ -23,6 +24,17 @@ export const NAME_RE = /^[a-zA-Z0-9_-]{1,40}$/;
 export const CONF = ENV.WEB_PI_TMUX_CONF;
 if (RAW_ENV.WEB_PI_TMUX_CONF && !fs.existsSync(CONF)) {
   console.warn(`WEB_PI_TMUX_CONF=${CONF} does not exist — using tmux defaults`);
+}
+
+/** Session name a resumed pi session runs under: 'r-' + the FULL session id.
+ *  pi ids are UUIDv7, so any prefix is just the creation timestamp's high
+ *  bits — sessions started within about a minute of each other share their
+ *  first 8 hex chars, and a truncated name attached the second one's resume
+ *  to the first one's running pi. Ids too long (or not tmux-safe) for
+ *  NAME_RE get a hash of the id instead. */
+export function resumeSessionName(id: string): string {
+  const name = `r-${id}`;
+  return NAME_RE.test(name) ? name : `r-${createHash('sha256').update(id).digest('hex').slice(0, 32)}`;
 }
 
 /** Session name a scheduled job's run opens on this socket (src/lib/jobs.ts

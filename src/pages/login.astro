@@ -55,8 +55,17 @@ import '@awesome.me/webawesome/dist/components/icon/icon.js';
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username: value('username'), password: value('password') }),
     });
-    if (res.ok) { location.href = `${BASE}/`; return; }
-    err.textContent = res.status === 429 ? 'too many attempts — wait 15 minutes' : 'invalid credentials';
+    if (res.ok) {
+      // The server renders this page in place of any signed-out page URL
+      // (/jobs, /?live=…): reload it to land where the user was going.
+      if (location.pathname === `${BASE}/login`) location.href = `${BASE}/`;
+      else location.reload();
+      return;
+    }
+    err.textContent =
+      res.status === 429 ? 'too many attempts — wait 15 minutes' :
+      res.status === 503 ? 'server busy — try again in a moment' :
+      'invalid credentials';
     err.classList.remove('hidden');
   });
 </script>

@@ -20,6 +20,9 @@ export const envSchema = {
   WEB_PI_PORT: { type: 'number', context: 'server', access: 'secret', default: 3000 },
   WEB_PI_BASE: { type: 'string', context: 'server', access: 'secret', default: '/' },
   WEB_PI_TMUX_SOCKET: { type: 'string', context: 'server', access: 'secret', default: 'web-pi' },
+  // Reverse-proxy hops in front of the server whose X-Forwarded-For entries
+  // are trusted (nginx = 1, ALB → nginx = 2). 0: XFF is ignored entirely.
+  WEB_PI_TRUST_PROXY: { type: 'number', context: 'server', access: 'secret', default: 0 },
   // Dynamic defaults — see env.ts (homedir / app root / fs probe / cross-var).
   WEB_PI_HOME: { type: 'string', context: 'server', access: 'secret', optional: true },
   WEB_PI_AGENT_DIR: { type: 'string', context: 'server', access: 'secret', optional: true },
@@ -30,6 +33,7 @@ export const envSchema = {
   WEB_PI_NEW_SESSION_CWD: { type: 'string', context: 'server', access: 'secret', optional: true },
   WEB_PI_COMMAND: { type: 'string', context: 'server', access: 'secret', optional: true },
   WEB_PI_TMUX_CONF: { type: 'string', context: 'server', access: 'secret', optional: true },
+  WEB_PI_HIDDEN_FILE: { type: 'string', context: 'server', access: 'secret', optional: true },
   WEB_PI_SYSTEMCTL: { type: 'string', context: 'server', access: 'secret', default: 'systemctl' },
   WEB_PI_SYSTEMD_ANALYZE: { type: 'string', context: 'server', access: 'secret', default: 'systemd-analyze' },
 } as const satisfies Record<string, ServerEnvField>;

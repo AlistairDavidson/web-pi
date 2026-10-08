@@ -13,8 +13,15 @@ function readSchemaEnv(): SchemaEnv {
   const out: Record<string, string | number | boolean | undefined> = {};
   for (const [key, field] of Object.entries(envSchema) as [string, ServerEnvField][]) {
     const raw = process.env[key];
-    if (field.type === 'number') out[key] = parseInt(raw ?? String(field.default), 10);
-    else if (field.type === 'boolean') out[key] = raw === 'true' ? true : raw === 'false' ? false : field.default;
+    if (field.type === 'number') {
+      // Fail at boot on a non-integer rather than run with NaN
+      // (parseInt('abc') used to become a NaN listen port).
+      const n = raw === undefined || raw.trim() === '' ? field.default : Number(raw);
+      if (typeof n !== 'number' || !Number.isInteger(n)) {
+        throw new Error(`${key}=${JSON.stringify(raw)} is not an integer`);
+      }
+      out[key] = n;
+    } else if (field.type === 'boolean') out[key] = raw === 'true' ? true : raw === 'false' ? false : field.default;
     else out[key] = raw ?? field.default;
   }
   return out as SchemaEnv;
@@ -27,15 +34,19 @@ export const PI_SESSION_DIR: string | undefined = process.env.PI_CODING_AGENT_SE
 
 const home = RAW_ENV.WEB_PI_HOME ?? os.homedir();
 const agentDir = RAW_ENV.WEB_PI_AGENT_DIR ?? path.join(APP_ROOT, '.pi-agent');
+const authFile = RAW_ENV.WEB_PI_AUTH_FILE ?? path.join(APP_ROOT, 'auth.json');
 
 export const ENV = {
   WEB_PI_HOST: RAW_ENV.WEB_PI_HOST,
   WEB_PI_PORT: RAW_ENV.WEB_PI_PORT,
   WEB_PI_BASE: RAW_ENV.WEB_PI_BASE,
   WEB_PI_TMUX_SOCKET: RAW_ENV.WEB_PI_TMUX_SOCKET,
+  WEB_PI_TRUST_PROXY: RAW_ENV.WEB_PI_TRUST_PROXY,
   WEB_PI_HOME: home,
   WEB_PI_AGENT_DIR: agentDir,
-  WEB_PI_AUTH_FILE: RAW_ENV.WEB_PI_AUTH_FILE ?? path.join(APP_ROOT, 'auth.json'),
+  WEB_PI_AUTH_FILE: authFile,
+  // Operator state lives beside the credential by default.
+  WEB_PI_HIDDEN_FILE: RAW_ENV.WEB_PI_HIDDEN_FILE ?? path.join(path.dirname(authFile), 'hidden-sessions.json'),
   WEB_PI_CLIENT_DIR: RAW_ENV.WEB_PI_CLIENT_DIR ?? path.join(APP_ROOT, 'dist', 'client'),
   WEB_PI_ASTRO_ENTRY: RAW_ENV.WEB_PI_ASTRO_ENTRY ?? path.join(APP_ROOT, 'dist', 'server', 'entry.mjs'),
   WEB_PI_SESSIONS_DIR: RAW_ENV.WEB_PI_SESSIONS_DIR ?? PI_SESSION_DIR ?? path.join(agentDir, 'sessions'),

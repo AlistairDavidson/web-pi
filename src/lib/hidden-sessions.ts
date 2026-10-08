@@ -3,8 +3,8 @@
 // 'hide from the sidebar': ids persist in a small JSON file and can be
 // unhidden again. pi's session files themselves are never touched.
 //
-// State file: WEB_PI_HIDDEN_FILE, else hidden-sessions.json next to the
-// auth file (operator state lives there by default). Read errors are
+// State file: ENV.WEB_PI_HIDDEN_FILE (default: hidden-sessions.json next to
+// the auth file — operator state lives there; see env.ts). Read errors are
 // tolerated (missing/corrupt → empty set, warned); write failures are
 // returned to the caller so the API can 500 instead of lying.
 import * as fs from 'node:fs';
@@ -19,10 +19,7 @@ export class HiddenSessions {
   private file: string;
   private ids = new Set<string>();
 
-  constructor(authFile: string) {
-    this.file = process.env.WEB_PI_HIDDEN_FILE
-      ?? path.join(path.dirname(authFile), 'hidden-sessions.json');
-  }
+  constructor(file: string) { this.file = file; }
 
   get filePath(): string { return this.file; }
   get size(): number { this.ensureLoaded(); return this.ids.size; }

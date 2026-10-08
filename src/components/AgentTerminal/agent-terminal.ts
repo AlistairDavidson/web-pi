@@ -1,5 +1,11 @@
 // agent-terminal.ts — <agent-terminal>: xterm.js over websocket to node-pty/tmux.
 // Light DOM (xterm injects its own styles; global CSS applies).
+// Connection life: attach() opens a socket for one target. If it drops
+// without the server ending the attach (proxy idle cut, server restart,
+// network blip), the status says so and the terminal reattaches to the same
+// tmux session with backoff. The server's 'exit' / 'error' end an attach for
+// good — no reconnect, so two tabs bumping each other off a session
+// (`attach -d`) can't loop.
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -8,6 +14,28 @@ import '@awesome.me/webawesome/dist/components/spinner/spinner.js';
 import '@awesome.me/webawesome/dist/components/icon/icon.js';
 import type { ClientMsg, ServerMsg } from '../../lib/types';
 import { BASE } from '../../base';
+
+/** Max UTF-16 units per input frame. JSON spends at most 6 bytes on one
+ *  unit (\u001b-style escapes), so a frame stays under ~384 KiB — inside
+ *  the server's 1 MiB maxPayload however big the paste is. */
+const INPUT_CHUNK = 64 * 1024;
+const RECONNECT_MIN_MS = 1000;
+const RECONNECT_MAX_MS = 15_000;
+
+/** Input split into frames of at most INPUT_CHUNK units, never between the
+ *  halves of a surrogate pair (a lone half would reach the pty as U+FFFD). */
+function chunkInput(data: string): string[] {
+  if (data.length <= INPUT_CHUNK) return [data];
+  const out: string[] = [];
+  for (let i = 0; i < data.length;) {
+    let end = Math.min(i + INPUT_CHUNK, data.length);
+    const last = data.charCodeAt(end - 1);
+    if (end < data.length && last >= 0xd800 && last <= 0xdbff) end--;
+    out.push(data.slice(i, end));
+    i = end;
+  }
+  return out;
+}
 
 export class AgentTerminal extends HTMLElement {
   static get observedAttributes(): string[] {
@@ -19,7 +47,23 @@ export class AgentTerminal extends HTMLElement {
   websocket?: WebSocket;
   activeKey?: string;
   resizeObserver?: ResizeObserver;
+  /** tmux session the server last attached us to — where a reconnect goes,
+   *  always in live mode: a resume is never re-run, so a pi that exited in
+   *  the meantime ends in 'no such live session', not a fresh pi. */
+  private attachedTarget: string | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectDelay = RECONNECT_MIN_MS;
+  /** Back online / tab visible again: skip the rest of a pending backoff. */
+  private readonly reconnectNow = (): void => {
+    if (this.reconnectTimer === null || document.visibilityState === 'hidden') return;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.reconnect();
+  };
+
   connectedCallback(): void {
+    window.addEventListener('online', this.reconnectNow);
+    document.addEventListener('visibilitychange', this.reconnectNow);
     if (this.terminal) {
       return;
     }
@@ -46,9 +90,11 @@ export class AgentTerminal extends HTMLElement {
 
     this.fitXtermAddon.fit();
 
-    this.terminal.onData(d =>
-      this.send({ type: 'input', data: d })
-    );
+    // A paste arrives as one onData call of any size — sent as consecutive
+    // frames, which the server writes to the pty in order.
+    this.terminal.onData(d => {
+      for (const data of chunkInput(d)) this.send({ type: 'input', data });
+    });
 
     this.terminal.onResize(
       () => this.sendSize()
@@ -78,6 +124,8 @@ export class AgentTerminal extends HTMLElement {
   }
 
   disconnectedCallback(): void {
+    window.removeEventListener('online', this.reconnectNow);
+    document.removeEventListener('visibilitychange', this.reconnectNow);
     this.resizeObserver?.disconnect();
     this.resizeObserver = undefined;
   }
@@ -108,27 +156,30 @@ export class AgentTerminal extends HTMLElement {
   }
 
   attach(mode: 'live' | 'resume', target: string, key: string): void {
-    if (this.websocket) {
-      try {
-        this.websocket.close();
-      } catch { }
-    }
-
+    this.cancelReconnect();
+    this.closeSocket();
     this.terminal?.reset();
     this.terminal?.focus();
     this.activeKey = key;
-    this.status(`connecting: ${target} …`, 'busy');
+    this.attachedTarget = null;
+    this.connect(mode === 'live'
+      ? { type: 'attach', mode: 'live', target }
+      : { type: 'attach', mode: 'resume', id: target }, target, key);
+  }
+
+  /** Open a socket and send one attach. A close the server didn't announce
+   *  (no 'exit' / 'error' first) after a successful attach reconnects. */
+  private connect(msg: ClientMsg, label: string, key: string): void {
+    this.status(`connecting: ${label} …`, 'busy');
 
     // Browser WebSocket only accepts ws:/wss: — and the server's upgrade
     // handler (server/main.ts) serves ${BASE}/ws.
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const websocket = new WebSocket(`${proto}//${location.host}${BASE}/ws`);
-
     this.websocket = websocket;
+    let ended = false; // the server ended this attach itself — don't reconnect
+
     websocket.onopen = () => {
-      const msg: ClientMsg = mode === 'live'
-        ? { type: 'attach', mode: 'live', target }
-        : { type: 'attach', mode: 'resume', id: target };
       websocket.send(JSON.stringify(msg));
       this.sendSize();
     };
@@ -136,14 +187,58 @@ export class AgentTerminal extends HTMLElement {
     websocket.onmessage = ev => {
       let m: ServerMsg; try { m = JSON.parse(ev.data as string) as ServerMsg; } catch { return; }
       if (m.type === 'output') this.terminal?.write(m.data);
-      else if (m.type === 'attached') this.status(`attached: ${m.target} (${m.socket} socket)`, 'ok');
-      else if (m.type === 'error') { this.status(m.message, 'err'); this.terminal?.write(`\r\n\u001b[31m${m.message}\u001b[0m\r\n`); }
-      else if (m.type === 'exit') this.status(`detached: ${m.target}`, 'info');
+      else if (m.type === 'attached') {
+        this.attachedTarget = m.target;
+        this.reconnectDelay = RECONNECT_MIN_MS;
+        this.status(`attached: ${m.target} (${m.socket} socket)`, 'ok');
+      }
+      else if (m.type === 'error') { ended = true; this.status(m.message, 'err'); this.terminal?.write(`\r\n\u001b[31m${m.message}\u001b[0m\r\n`); }
+      else if (m.type === 'exit') { ended = true; this.status(`detached: ${m.target}`, 'info'); }
     };
 
     websocket.onclose = () => {
-      if (this.activeKey === key) this.dispatchEvent(new CustomEvent('terminal-closed', { detail: key }));
+      if (this.websocket !== websocket) return; // superseded by attach() or a reconnect
+      this.websocket = undefined;
+      if (this.activeKey !== key) return;
+      if (!ended) {
+        if (this.attachedTarget) this.scheduleReconnect();
+        else this.status(`could not connect: ${label}`, 'err');
+      }
+      // The console re-polls state on every close — which also sends an
+      // expired login back to the sign-in page instead of retrying forever.
+      this.dispatchEvent(new CustomEvent('terminal-closed', { detail: key }));
     };
+  }
+
+  private closeSocket(): void {
+    const ws = this.websocket;
+    this.websocket = undefined; // its onclose now sees it was superseded
+    if (ws) { try { ws.close(); } catch { /* already closed */ } }
+  }
+
+  private scheduleReconnect(): void {
+    const delay = this.reconnectDelay;
+    this.reconnectDelay = Math.min(delay * 2, RECONNECT_MAX_MS);
+    this.status(`disconnected — reconnecting in ${Math.round(delay / 1000)}s …`, 'busy');
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.reconnect();
+    }, delay);
+  }
+
+  /** Back to the session we were attached to; tmux redraws the screen and
+   *  xterm keeps its scrollback (no reset). */
+  private reconnect(): void {
+    const target = this.attachedTarget;
+    const key = this.activeKey;
+    if (!target || !key) return;
+    this.connect({ type: 'attach', mode: 'live', target }, target, key);
+  }
+
+  private cancelReconnect(): void {
+    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.reconnectDelay = RECONNECT_MIN_MS;
   }
 
   refit(): void { this.fitXtermAddon?.fit(); }

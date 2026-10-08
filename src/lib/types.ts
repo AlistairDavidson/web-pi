@@ -114,6 +114,9 @@ export interface UpdateResult {
 }
 
 // ---- WS wire protocol (JSON envelopes) ----
+// The server checks every client frame against these shapes
+// (parseClientMsg, server/main.ts) and drops anything else. A big paste
+// arrives as several consecutive input frames (agent-terminal.ts chunks it).
 export type ClientMsg =
   | { type: 'attach'; mode: 'live'; target: string }
   | { type: 'attach'; mode: 'resume'; id: string }

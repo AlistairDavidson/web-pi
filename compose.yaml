@@ -40,6 +40,10 @@ services:
     environment:
       WEB_PI_BASE: ${WEB_PI_BASE:-/}
       WEB_PI_NEW_SESSION_CWD: /app # sessions start in the living project
+      # One proxy hop (deploy/nginx-webpi.conf): rate limits key on the IP
+      # nginx appended to X-Forwarded-For. Safe with the loopback-only
+      # publish below — only local processes can reach the port directly.
+      WEB_PI_TRUST_PROXY: 1
     volumes:
       - webpi-app:/app
     restart: unless-stopped
