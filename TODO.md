@@ -55,6 +55,7 @@ new app
 rename app
 set app icon
 delete app
+console sidebar for when in other apps (in which case maybe console isn't an app)
 
 self-naming sessions
 
