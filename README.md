@@ -226,6 +226,18 @@ docker compose build        # subpath deploy: WEB_PI_BASE=/console docker compos
 docker compose up -d        # loopback :3000, app on the named volume webpi-app
 ```
 
+Boxes that shouldn't build can pull instead: tags `v*` publish the prod
+image to `ghcr.io/<owner>/web-pi` (the version + `latest`):
+
+```sh
+WEB_PI_IMAGE=ghcr.io/<owner>/web-pi:latest docker compose pull webpi
+WEB_PI_IMAGE=ghcr.io/<owner>/web-pi:latest docker compose up -d
+```
+
+With `WEB_PI_IMAGE` unset, compose builds and runs `web-pi:local` as above.
+The pulled image's `WEB_PI_BASE` was baked at build time — a subpath deploy
+must pull an image built with the same base.
+
 Or skip Docker: the npm package is a deploy channel too —
 
 ```sh

@@ -1,0 +1,112 @@
+# Release publishing — the two channels TODO.md calls out. The always-on
+# build-validate gate stays in docker.yml (untouched); nothing here runs on
+# branch pushes.
+#
+#   image         tags v* → build the prod target, push ghcr.io/<owner>/web-pi
+#                 (version + latest). Pull-based deploys: README "Deploying".
+#   npm-artifact  tags v* + PRs that can change the shipped artifact →
+#                 npm ci, build, pack, global-install the tarball into a
+#                 temp prefix, boot it, expect /login 200. `npm publish`
+#                 itself stays a manual step (prepublishOnly builds).
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - package.json
+      - package-lock.json
+      - tsconfig.json
+      - tsconfig.server.json
+      - astro.config.mjs
+      - public/**
+      - server/**
+      - src/**
+      - pi/**
+      - tmux.conf
+      - tools/prepack.mjs
+      - .github/workflows/release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+
+      - name: Build and push prod image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: prod
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  npm-artifact:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run build
+
+      # prepack rebuilds + chmods the bins; the tarball must boot as-is.
+      - run: npm pack
+
+      - name: Global-install the tarball and smoke-test boot
+        run: |
+          set -eu
+          PREFIX="$RUNNER_TEMP/webpi-g"
+          HOME_DIR="$RUNNER_TEMP/webpi-home"
+          mkdir -p "$HOME_DIR"
+          npm install -g "$GITHUB_WORKSPACE"/web-pi-*.tgz --prefix "$PREFIX" --no-audit --no-fund
+          test -x "$PREFIX/bin/web-pi" && test -x "$PREFIX/bin/webpi-set-password"
+          WEB_PI_HOME="$HOME_DIR" WEB_PI_PORT=3123 "$PREFIX/bin/web-pi" > "$RUNNER_TEMP/web-pi-boot.log" 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; cat "$RUNNER_TEMP/web-pi-boot.log"' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3123/login >/dev/null; then
+              echo "globally-installed web-pi served /login after ~${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::globally-installed web-pi never served /login within 30s"
+          exit 1

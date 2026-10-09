@@ -25,7 +25,11 @@ services:
       args:
         # Baked into the pages at build time AND needed at runtime — keep in sync.
         WEB_PI_BASE: ${WEB_PI_BASE:-/}
-    image: web-pi:local
+    # web-pi:local is built on this box (below). To run a CI-built image
+    # instead (release tags publish ghcr.io/<owner>/web-pi), set WEB_PI_IMAGE
+    # and `docker compose pull webpi` before `up -d` — README "Deploying".
+    # The pulled image's build-time WEB_PI_BASE still applies.
+    image: ${WEB_PI_IMAGE:-web-pi:local}
     # tini as PID 1: the server installs no signal handlers and, as PID 1,
     # the kernel ignores unhandled SIGTERM — without this every stop/
     # restart burns the full 10s grace then SIGKILLs (tmux sessions with
