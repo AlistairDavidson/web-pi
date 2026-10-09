@@ -1,7 +1,5 @@
 apps folder that contains git submodules
 
-update pi button, auto-update setting
-
 management page (replaces the panic-endpoint idea) — rollback AND applying changes in one place:
 - the one unmodifiable part of the software: programmatic enforcement — the apply step rejects any patch that changes it from within the container; it can only be modified in the original project
 - whole page, designed after the split lands (its "protected from modification" property is exactly what the split makes enforceable); handles picking a git commit, rebuilding, swapping, basic feedback
