@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { expect, test, type Cookie, type Page } from '@playwright/test';
+import { WebSocket as NodeWebSocket } from 'ws';
 import { MARKER, PASSWORD, TMUX_SOCKET, USERNAME, UUIDV7_SIBLINGS, WORKSPACE } from './env';
 
 const FIXTURE_A = '11111111-1111-1111-1111-111111111111';
@@ -349,27 +350,40 @@ test('jobs page degrades to a notice when systemctl --user is absent', async ({ 
   await login(page);
   await expect(page.locator('wa-button#nav-jobs')).toHaveCount(1);
 
-  const r = await page.request.get('/api/jobs');
-  expect(r.status()).toBe(200);
-  expect(await r.json()).toMatchObject({ available: false, jobs: [] });
+  // Authenticated calls go through the page, not page.request — the
+  // API client doesn't send the Secure session cookie over the suite's
+  // plain-http origin (AGENTS.md).
+  const api = (method: string, path: string, body?: unknown): Promise<{ status: number; body: unknown }> =>
+    page.evaluate(async ({ method, path, body }) => {
+      const r = await fetch(path, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+      let json: unknown = null;
+      try { json = await r.json(); } catch { /* not json */ }
+      return { status: r.status, body: json };
+    }, { method, path, body });
+
+  const r = await api('GET', '/api/jobs');
+  expect(r.status).toBe(200);
+  expect(r.body).toMatchObject({ available: false, jobs: [] });
 
   await page.goto('/jobs');
   await expect(page.locator('wa-callout#jobs-degraded:not(.hidden)')).toBeVisible();
   await expect(page.locator('wa-callout#jobs-degraded')).toContainText('systemctl --user');
   await expect(page.locator('wa-button#jobs-new.hidden')).toHaveCount(1);
 
-  const validate = await page.request.post('/api/jobs/validate', { data: { schedule: 'daily 08:00' } });
-  expect(validate.status()).toBe(200);
-  const check = await validate.json() as { valid: boolean; validatedBy: string };
+  const validate = await api('POST', '/api/jobs/validate', { schedule: 'daily 08:00' });
+  expect(validate.status).toBe(200);
+  const check = validate.body as { valid: boolean; validatedBy: string };
   expect(check.valid).toBe(true);
   expect(['basic', 'systemd-analyze']).toContain(check.validatedBy);
 
   // Mutations degrade to 503 (not 500) while the backend is unusable.
-  const create = await page.request.post('/api/jobs',
-    { data: { name: 'itest-job', schedule: 'daily 08:00', command: 'true' } });
-  expect(create.status()).toBe(503);
-  expect((await page.request.post('/api/jobs/itest-job/run')).status()).toBe(503);
-  expect((await page.request.delete('/api/jobs/itest-job')).status()).toBe(503);
+  expect((await api('POST', '/api/jobs', { name: 'itest-job', schedule: 'daily 08:00', command: 'true' })).status).toBe(503);
+  expect((await api('POST', '/api/jobs/itest-job/run')).status).toBe(503);
+  expect((await api('DELETE', '/api/jobs/itest-job')).status).toBe(503);
 });
 
 test('hide: session leaves the sidebar, manage dialog restores it', async ({ page }) => {
@@ -516,6 +530,126 @@ test('settings dashboard shows effective config; update dry-run is check-only', 
   expect(dry.body.ok).toBe(true);
   expect(dry.body.dryRun).toBe(true);
   expect(dry.body.output).toContain('would run');
+});
+
+// ---------- browser hardening (DESIGN_REVIEW §1.2) ----------
+
+const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+  "connect-src 'self' wss:; frame-ancestors 'none'";
+
+/** The four security headers every app-sent response carries. */
+function expectSecurityHeaders(headers: Record<string, string>): void {
+  expect(headers['content-security-policy']).toBe(CSP);
+  expect(headers['x-frame-options']).toBe('DENY');
+  expect(headers['x-content-type-options']).toBe('nosniff');
+  expect(headers['referrer-policy']).toBe('same-origin');
+}
+
+test('non-GET requests with a foreign Origin are rejected; no Origin behaves normally', async ({ page, request }) => {
+  await page.goto('/login'); // establish the suite origin for the page below
+  // A present-but-mismatched Origin (sibling subdomain, sandboxed "null")
+  // is 403 before auth is even consulted.
+  for (const origin of ['https://evil.example', 'https://console.example.com', 'null']) {
+    const r = await request.post('/api/session/hide', { headers: { Origin: origin }, data: { id: FIXTURE_A } });
+    expect(r.status(), `Origin: ${origin}`).toBe(403);
+  }
+  // No Origin header at all (curl, API clients) and a matching Origin both
+  // reach the normal auth gate — 401 here, this context has no session.
+  expect((await request.post('/api/session/hide', { data: { id: FIXTURE_A } })).status()).toBe(401);
+  const origin = new URL(page.url()).origin;
+  expect((await request.post('/api/session/hide', { headers: { Origin: origin }, data: { id: FIXTURE_A } })).status()).toBe(401);
+
+  // The browser path — a same-origin POST from an authed page — keeps
+  // working (the browser attaches the page's own Origin).
+  await login(page);
+  expect(await page.evaluate(async () =>
+    (await fetch('/api/session/unhide', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"all":true}',
+    })).status)).toBe(200);
+});
+
+test('WS upgrades demand a matching Origin — missing or foreign destroys the socket', async ({ page }) => {
+  await login(page);
+  const token = (await page.context().cookies()).find(c => c.name === 'webpi_session')?.value ?? '';
+  const wsOrigin = new URL(page.url()).origin;
+
+  // Raw ws client from the test process: browsers can't omit or forge
+  // Origin, so the gate is only observable from Node.
+  const attempt = (headers: Record<string, string>): Promise<'open' | 'rejected'> =>
+    new Promise(resolve => {
+      const ws = new NodeWebSocket(`${wsOrigin.replace(/^http/, 'ws')}/ws`, { headers });
+      let settled = false;
+      const settle = (v: 'open' | 'rejected'): void => {
+        if (settled) return;
+        settled = true;
+        try { ws.close(); } catch { /* never opened */ }
+        resolve(v);
+      };
+      ws.on('open', () => settle('open'));
+      ws.on('error', () => settle('rejected'));
+      ws.on('unexpected-response', () => settle('rejected'));
+      ws.on('close', () => settle('rejected'));
+    });
+
+  // Missing Origin: the endpoint is browser-only — no curl/websocat
+  // terminals — so the socket is destroyed, not a polite 4xx.
+  expect(await attempt({})).toBe('rejected');
+  // Foreign Origin (cross-site WebSocket hijacking) is destroyed too.
+  expect(await attempt({ Origin: 'https://evil.example' })).toBe('rejected');
+  // A matching Origin without a session gets the 401 handshake, and with
+  // the session cookie the upgrade completes.
+  expect(await attempt({ Origin: wsOrigin })).toBe('rejected');
+  expect(await attempt({ Origin: wsOrigin, Cookie: `webpi_session=${token}` })).toBe('open');
+});
+
+test('security headers ride on page, asset and API responses', async ({ request }) => {
+  const page = await request.get('/login');
+  expect(page.status()).toBe(200);
+  expectSecurityHeaders(page.headers());
+
+  // A hashed Astro asset referenced by that page (external module — the
+  // CSP's script-src 'self' depends on Astro never inlining scripts).
+  const src = (await page.text()).match(/<script[^>]*\bsrc="([^"]+)"/)?.[1];
+  expect(src).toBeTruthy();
+  const asset = await request.get(src!);
+  expect(asset.status()).toBe(200);
+  expectSecurityHeaders(asset.headers());
+
+  // An API response (this 401 is itself sent by the app, headers and all).
+  const api = await request.get('/api/state');
+  expect(api.status()).toBe(401);
+  expectSecurityHeaders(api.headers());
+});
+
+test('console/jobs/settings load requests nothing off-origin and glyphs render from the app itself', async ({ page }) => {
+  await login(page);
+  const self = new URL(page.url()).origin;
+  const external: string[] = [];
+  // Aborting (not just observing) proves the page works without them:
+  // under the CSP a CDN icon fetch would fail and the glyph would vanish.
+  await page.route('**/*', route => {
+    const url = new URL(route.request().url());
+    if (url.origin !== self) {
+      external.push(url.href);
+      return route.abort();
+    }
+    return route.continue();
+  });
+
+  const glyphsRender = (): Promise<boolean> =>
+    page.waitForFunction(() => {
+      const icons = [...document.querySelectorAll('wa-icon')];
+      return icons.length > 0 && icons.every(i => i.shadowRoot?.querySelector('svg') != null);
+    }, null, { timeout: 8000 }).then(() => true, () => false);
+
+  await page.goto('/');
+  await page.waitForSelector('session-sidebar .nav');
+  expect(await glyphsRender()).toBe(true);
+  for (const p of ['/jobs', '/settings']) {
+    await page.goto(p);
+    expect(await glyphsRender(), `${p} glyphs`).toBe(true);
+  }
+  expect(external).toEqual([]);
 });
 
 test('login rate limit kicks in (10 per 15 min per IP) and ignores a spoofed X-Forwarded-For', async ({ request }) => {
