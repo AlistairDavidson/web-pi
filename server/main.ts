@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // main.ts — web-pi server.
 // One process: serves the Astro SSR build (pages via the middleware handler,
 // hashed assets statically), the REST API, and the WS→node-pty→tmux

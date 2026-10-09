@@ -219,6 +219,41 @@ docker compose build        # subpath deploy: WEB_PI_BASE=/console docker compos
 docker compose up -d        # loopback :3000, app on webpi-app, state on webpi-state (/state)
 ```
 
+Boxes that shouldn't build can pull instead: tags `v*` publish the prod
+image to `ghcr.io/<owner>/web-pi` (the version + `latest`):
+
+```sh
+docker login ghcr.io                     # GHCR packages are private by default
+WEB_PI_IMAGE=ghcr.io/<owner>/web-pi:latest docker compose pull webpi
+WEB_PI_IMAGE=ghcr.io/<owner>/web-pi:latest docker compose up -d
+```
+
+`pull` before `up -d`, in that order: with `WEB_PI_IMAGE` set but no image
+pulled, `up -d` falls back to building locally and *tags the build as the
+registry ref* — silently shadowing the published image. (The inverse habit
+— bare `docker compose pull` with `WEB_PI_IMAGE` unset — fails: `web-pi:local`
+is not a registry ref. Nothing is lost; build as above instead.) With
+`WEB_PI_IMAGE` unset, compose builds and runs `web-pi:local` as above.
+The pulled image's `WEB_PI_BASE` was baked at build time — a subpath deploy
+must pull an image built with the same base.
+
+Or skip Docker: the npm package is a deploy channel too —
+
+```sh
+npm i -g web-pi
+webpi-set-password              # interactive; creates webpi.db
+web-pi                          # serves on http://127.0.0.1:3000
+```
+
+— same `WEB_PI_*` env contract, loopback bind by default, behind the same
+reverse proxy (below). Nothing lands inside the installed package dir:
+all state defaults under `$WEB_PI_HOME/.local/state/web-pi`
+(`WEB_PI_STATE_DIR` moves it — see the env table). The /settings
+`update pi` button runs `npm install` in the install dir — on a
+root-owned global prefix that fails with EACCES; update by
+`npm i -g web-pi@latest` there instead. Requirements as above: Node
+≥ 22.13, a C++ toolchain to build `node-pty`, `tmux` on PATH.
+
 Front it with TLS — [`deploy/`](deploy/) has:
 
 - `nginx-webpi.conf` — TLS reverse proxy with the WebSocket upgrade map

@@ -60,9 +60,7 @@ low priority xterm official addons:
   
   serialize - "download transcript" / "copy output" button, zero server changes; maybe e2e assertions on terminal state 
 
-registry deploy flow - CI builds/pushes the image on tag, `docker compose pull` for boxes that shouldn't build
 
-npm publish packaging - bin/files/prepublishOnly build so `npm i -g web-pi` is a real deploy channel
 
 deploy polish (DESIGN_REVIEW 3.2): make the base path one documented value across README, nginx conf and the fail2ban filter (filter hard-codes POST /webpi/login with a NOTE to hand-adjust) — e.g. nginx sets a var, filter docs point at it
 
