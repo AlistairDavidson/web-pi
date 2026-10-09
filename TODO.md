@@ -30,9 +30,6 @@ Better auth
 
 when it stabilises, maybe build on pi-durable (is tmux still necessary with this?)
 
-validation-enhancer
-zod, astro/zod
-
 app management mcp
 how to build an app skills
 
