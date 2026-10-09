@@ -90,7 +90,16 @@ function seedAgentDir(): void {
     console.warn(`could not seed pi agent dir (${CFG.agentDir}):`, (err as Error).message);
   }
 }
-seedAgentDir();
+// Privilege split (DESIGN_REVIEW §1.1): with an absolute-path
+// WEB_PI_TMUX_SOCKET the tmux server — and every pi session — runs as
+// ANOTHER uid (the workspace half). The runtime agent dir belongs to
+// that uid, so seeding happens workspace-side at its boot
+// (docker-workspace-entrypoint.sh): web-side cp's would leave node-owned
+// 0644 files pi can't write next to its config. Single-user shapes
+// (relative socket name) keep seeding here.
+if (tmux.forksServer(tmux.SOCKET)) seedAgentDir();
+else console.log(`privilege split: tmux socket ${tmux.SOCKET} is an absolute path — ` +
+  `pi agent dir seeding and tmux server ownership live on the workspace side`);
 
 // Environment for processes spawned inside tmux sessions (pi). Delivered
 // per-session via `tmux new-session -e` — deterministic no matter when the
@@ -462,7 +471,17 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
         .replace(/^-+|-+$/g, '').slice(0, 30);
       if (!name) { send(res, 400, 'name required'); return; }
       tmux.newSession(name, CFG.newSessionCwd, CFG.command, sessionEnv, err2 => {
-        if (err2) { sendJSON(res, 409, { error: 'could not create session (name taken?)' }); return; }
+        if (err2) {
+          // The never-fork guard's refusal is a distinct, user-facing
+          // error (503 — retryable once the workspace side is back),
+          // unlike a taken name (409).
+          if (err2.message.startsWith(tmux.SERVER_NOT_RUNNING_MSG)) {
+            sendJSON(res, 503, { error: err2.message });
+          } else {
+            sendJSON(res, 409, { error: 'could not create session (name taken?)' });
+          }
+          return;
+        }
         sendJSON(res, 200, { name });
       });
     });
@@ -720,7 +739,7 @@ function attach(ws: WebSocket, token: string): void {
     });
     let x: Pty;
     try {
-      x = pty.spawn('tmux', ['-L', tmux.SOCKET, 'attach', '-d', '-t', ...args],
+      x = pty.spawn('tmux', [...tmux.socketArgs(tmux.SOCKET), 'attach', '-d', '-t', ...args],
         { name: 'xterm-256color', cols: size.cols, rows: size.rows, cwd: CFG.newSessionCwd, env }) as Pty;
     } catch (e) {
       wsSend(ws, { type: 'error', message: 'spawn failed: ' + (e as Error).message });
@@ -760,7 +779,13 @@ function attach(ws: WebSocket, token: string): void {
         }
         const name = tmux.resumeSessionName(found.id);
         tmux.resumeSession(name, cwd, CFG.command, found.id, sessionEnv, err => {
-          if (err) { wsSend(ws, { type: 'error', message: 'could not start resume session' }); return; }
+          if (err) {
+            const message = err.message.startsWith(tmux.SERVER_NOT_RUNNING_MSG)
+              ? tmux.SERVER_NOT_RUNNING_MSG // the never-fork guard — say it, don't bury it
+              : 'could not start resume session';
+            wsSend(ws, { type: 'error', message });
+            return;
+          }
           spawnTmux([name], name);
         });
       }

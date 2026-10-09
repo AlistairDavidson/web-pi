@@ -19,6 +19,14 @@ export const envSchema = {
   WEB_PI_HOST: { type: 'string', context: 'server', access: 'secret', default: '127.0.0.1' },
   WEB_PI_PORT: { type: 'number', context: 'server', access: 'secret', default: 3000 },
   WEB_PI_BASE: { type: 'string', context: 'server', access: 'secret', default: '/' },
+  // Relative name (default) = single-user: the app's own tmux server,
+  // forked on first new-session, in the per-uid default socket dir.
+  // Absolute path = the privilege split (DESIGN_REVIEW §1.1): the tmux
+  // server and every pi session run as ANOTHER uid/container (workspace),
+  // and this process is only a client on that shared socket — tmux gets
+  // `-S <path>` instead of `-L <name>` (a relative name resolves per-uid
+  // as $TMUX_TMPDIR/tmux-<uid>/<name>, unusable across uids), and
+  // new/resume sessions refuse to fork a server (see src/lib/tmux.ts).
   WEB_PI_TMUX_SOCKET: { type: 'string', context: 'server', access: 'secret', default: 'web-pi' },
   // Reverse-proxy hops in front of the server whose X-Forwarded-For entries
   // are trusted (nginx = 1, ALB → nginx = 2). 0: XFF is ignored entirely.

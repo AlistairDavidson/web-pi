@@ -21,6 +21,11 @@ web-pi server (Node, loopback by default)
 tmux socket ── session per tab ── pi ── ~/.pi/agent/sessions/
 ```
 
+On a plain host that is literally one process and one unix user. The
+default container deployment splits the same picture across two
+containers and two uids (server vs tmux/pi) — see
+[The privilege split](#the-privilege-split-two-containers).
+
 ## What you get
 
 - **New session** — a tmux session running `pi` (command configurable);
@@ -150,7 +155,7 @@ directly.
 | `WEB_PI_SESSIONS_DIR` | `PI_CODING_AGENT_SESSION_DIR`, else `<agent dir>/sessions` | where to list past pi sessions from |
 | `WEB_PI_NEW_SESSION_CWD` | `$WEB_PI_HOME` | cwd for new sessions |
 | `WEB_PI_COMMAND` | `<app root>/node_modules/.bin/pi` (falls back to `pi` on PATH) | command run in a new session (whitespace-split; resume appends `--session <id>` — only pi-family CLIs support that) |
-| `WEB_PI_TMUX_SOCKET` | `web-pi` | the tmux socket the app owns |
+| `WEB_PI_TMUX_SOCKET` | `web-pi` | the tmux socket the app uses. A relative *name* is the single-user shape: the app's own server, forked on the first new-session, under the per-uid default dir. An **absolute path** switches on the privilege split ([below](#the-privilege-split-two-containers)): tmux runs as another uid/container on that shared socket (`-S` instead of `-L` — a relative name resolves per-uid and cannot be shared), and new/resume sessions refuse to fork a server, erroring with "workspace tmux server not running" instead. The server lifecycle is then the workspace side's job (`docker-workspace-entrypoint.sh`, or the host-install equivalent below) |
 | `WEB_PI_TMUX_CONF` | `<app root>/tmux.conf` | tmux server config, applied when the tmux server starts (escape-time, scrollback, truecolour — see the file) |
 | `WEB_PI_DB_FILE` | `<state dir>/webpi.db` | sqlite state db (0600): login credential, `sessions` overlay table (hidden flags), scheduled-job tables (`jobs`, `job_runs` — the in-process scheduler). Fresh setup: `npm run set-password` creates it |
 | `WEB_PI_CLIENT_DIR` | `<app root>/dist/client` | Astro hashed assets |
@@ -200,10 +205,12 @@ installed on the box. Its config is project-controlled too:
 - [`pi/`](pi/) in the repo is the **template** — settings, `mcp.json`,
   skills, extensions; whatever the install should ship to every session.
 - The **runtime agent dir** (default `<state dir>/pi-agent`) is
-  seeded from it at server boot, **only where absent**: existing files always
+  seeded from it **only where absent**: existing files always
   win, so settings pi itself writes and operator edits are never clobbered,
   while template files added by upgrades still land. State only pi writes
-  (`auth.json`, `sessions/`) is never in the template.
+  (`auth.json`, `sessions/`) is never in the template. The seeder is
+  whoever owns the dir: the server at boot in single-user shapes, the
+  workspace entrypoint in the split (so every file lands uid-2000-owned).
 - Spawned sessions run with `PI_CODING_AGENT_DIR=<runtime dir>` (delivered
   via `tmux new-session -e`, deterministic per session) — they never touch
   your `~/.pi/agent`, in either direction.
@@ -217,8 +224,8 @@ sidebar unless you point `WEB_PI_SESSIONS_DIR` there.
 
 One host, one instance, everywhere web-pi runs. It is single-user and
 single-instance by design — sessions and the login/WS rate limits are
-in-process state, and the tmux server is host-local on the app's own
-socket (in a container: in the app's container) — so there is no
+in-process state, and the tmux server is host-local on one shared socket
+(in a container: the workspace container's) — so there is no
 multi-instance or load-balanced shape: run exactly one instance behind
 one proxy. The
 recommended deployment is a single VPS with Docker compose; on AWS, the
@@ -228,8 +235,95 @@ deploy.
 
 ```sh
 docker compose build        # subpath deploy: 'The base path' below first — WEB_PI_BASE=/webpi docker compose build
-docker compose up -d        # loopback :3000, app on webpi-app, state on webpi-state (/state)
+docker compose up -d        # web + workspace + one-shot init; loopback :3000, TLS reverse proxy in front
+docker compose exec webpi node dist-server/server/set-password.js   # once, on a fresh deploy
 ```
+
+### The privilege split (two containers)
+
+`docker compose up` boots three services from one image (prod shape of
+[DESIGN_REVIEW.md](DESIGN_REVIEW.md) §1.1):
+
+- **webpi** (uid `node`, the image's user) — serves the HTTP/WS app from
+  the image's copy at `/opt/web-pi`, which is **root-owned**: a prompt
+  injection inside a pi session can no longer rewrite the server, replace
+  the login credential, or plant persistence in it. Owns web state
+  (`webpi.db`) on the `webpi-state` volume at `/state`. Never runs the
+  tmux server — it is only a client on the shared socket.
+- **workspace** (uid 2000, user `workspace`) — owns the tmux server and
+  every pi session. Its entrypoint (`docker-workspace-entrypoint.sh`)
+  starts the tmux server on the shared absolute-path socket
+  `/run/web-pi/tmux` with `exit-empty off` (so it survives between
+  sessions — web's never-fork guard depends on it), `chmod 0660` +
+  `chgrp webpi` on the socket (tmux creates it 0600 regardless of umask),
+  admits the web user with `tmux server-access -a node`, seeds the runtime
+  pi-agent from the image's `pi/` template (only where absent — same
+  policy as the single-user server boot), and supervises the server.
+  Sessions' working files live on the `webpi-workspace` volume at
+  `/workspace` (cwd of new sessions, `WEB_PI_NEW_SESSION_CWD`); pi's
+  runtime dir (`WEB_PI_AGENT_DIR=/workspace/pi-agent`, credentials +
+  session store) is there too.
+- **workspace-init** (one-shot, root) — `chown workspace:webpi` +
+  `chmod 2770` on the socket dir (`webpi-tmux` volume at `/run/web-pi`)
+  and `/workspace`: empty named volumes start root-owned, and the socket
+  dir must be setgid group `webpi` (gid 2001) for the sharing below.
+
+The two halves share a `webpi` group (gid 2001; `node` is a member, it is
+`workspace`'s primary group). The workspace side runs with **umask 0007**,
+which the tmux server passes on to everything it spawns: pi's session
+files land group `webpi` and group-readable, so the web sidebar can list
+and resume past sessions (web mounts `/workspace` read-mostly — it never
+writes there; hidden flags live in its own db). Cross-uid tmux access is
+what `server-access` grants: without an entry the foreign-uid client gets
+a hard "access not allowed"; with it, full client access on the socket.
+
+Path agreement matters in this shape: `WEB_PI_COMMAND` (default: the
+image's vendored `/opt/web-pi/node_modules/.bin/pi`) and the session cwd
+resolve **in the workspace container** — both containers use the same
+image and mount the shared volumes at the same paths, so the defaults
+hold. Scheduled jobs are unchanged: the scheduler fires `new-session` on
+the same shared socket (same guard, same env), so runs land in the
+workspace container too and appear in Live like any session — a job only
+runs while the web server is up, exactly as before.
+
+The pre-split `webpi-app` volume (the entrypoint-synced `/app` the server
+served from) is obsolete — web serves from the image now — and is left in
+place, unused, on existing hosts.
+
+#### The same split on a plain host (two unix users)
+
+A host install (npm package or checkout) can have the same guarantee
+without Docker — run the server and the sessions as different users over
+one shared socket. Once, as root:
+
+```sh
+groupadd -g 2001 webpi
+useradd -u 2000 -g webpi -m web-pi-work     # the sessions' user
+usermod -aG webpi <your-user>               # the server's user joins the group
+install -d -o web-pi-work -g webpi -m 2770 /run/web-pi   # socket dir: setgid, shared group
+```
+
+Then, **as `web-pi-work`**, own the tmux server (umask 0007 makes
+everything it spawns group-readable — that is what lets the server's
+user list pi sessions; `exit-empty off` must ride the server-start conf,
+because a separate `set-option` races the empty server's instant exit —
+same reason `docker-workspace-entrypoint.sh` composes the conf):
+
+```sh
+sudo -u web-pi-work sh -c 'umask 0007; \
+  { cat <app>/tmux.conf; echo "set -g exit-empty off"; } > /tmp/webpi-tmux.conf && \
+  tmux -S /run/web-pi/tmux -f /tmp/webpi-tmux.conf start-server && rm -f /tmp/webpi-tmux.conf && \
+  chmod 0660 /run/web-pi/tmux && chgrp webpi /run/web-pi/tmux && \
+  tmux -S /run/web-pi/tmux server-access -a <your-user>'
+```
+
+(/run is wiped on boot — repeat the server bring-up from your boot
+scripts, or put the socket on persistent storage.) And run the server
+itself, as your user, with the split env — `WEB_PI_TMUX_SOCKET=/run/web-pi/tmux`,
+a sessions cwd and `WEB_PI_AGENT_DIR` that exist and are writable for
+`web-pi-work`, and `WEB_PI_HOME` pointing at a home that user can write.
+The server then attaches and creates sessions on `web-pi-work`'s server
+as a cross-uid client, exactly like the web container does.
 
 Boxes that shouldn't build can pull instead: tags `v*` publish the prod
 image to `ghcr.io/<owner>/web-pi` (the version + `latest`):
@@ -275,18 +369,32 @@ Front it with TLS — [`deploy/`](deploy/) has:
 - `fail2ban-filter-webpi.conf` + `fail2ban-jail.conf` — fail2ban watching
   the nginx access log for failed logins (401/429 on the login POST)
 
-State (`webpi.db`, `pi-agent/` — pi credentials + sessions) lives on its
-own `webpi-state` volume at `/state` (`WEB_PI_STATE_DIR`), outside the
-entrypoint-synced `/app` — image syncs can't touch it by construction.
-Installs from before the state directory existed (state in `/app` or the
-app root) move once by hand; there is deliberately no migration system:
+State is split by owner, like everything else in the two-container shape:
+`webpi.db` (login credential, hidden sessions, jobs) lives on the
+`webpi-state` volume at `/state` (`WEB_PI_STATE_DIR`), owned by the web
+uid; `pi-agent/` (pi credentials + sessions) lives on `webpi-workspace`
+at `/workspace/pi-agent`, owned by the workspace uid. There is deliberately
+no migration system — move once by hand, and the move depends on the era
+you installed from. Current installs (state already on `/state`:
+`webpi.db` stays put, `pi-agent/` crosses to the workspace volume):
 
 ```sh
-# container: state sat on the webpi-app volume under /app
 docker compose down
-docker compose build   # node-owned /state exists only in the NEW image — build first
-docker compose run --rm --entrypoint sh webpi -c \
-  'mkdir -p /state && mv /app/webpi.db /state/ && mv /app/.pi-agent /state/pi-agent'
+docker compose build   # the new users exist only in the NEW image — build first
+docker compose run --rm --user 0:0 --entrypoint sh webpi -c \
+  'mv /state/pi-agent /workspace/pi-agent && chown -R 2000:2001 /workspace/pi-agent'
+docker compose up -d
+```
+
+Older installs (state sat on the now-unused `webpi-app` volume under
+`/app`) move both halves:
+
+```sh
+# container: state sat on the (now unused) webpi-app volume under /app
+docker compose down
+docker compose build   # the new users + node-owned /state exist only in the NEW image — build first
+docker compose run --rm --user 0:0 --volume webpi-app:/old-app --entrypoint sh webpi -c \
+  'mv /old-app/webpi.db /state/webpi.db && mv /old-app/.pi-agent /workspace/pi-agent && chown node:node /state/webpi.db && chown -R 2000:2001 /workspace/pi-agent'
 docker compose up -d
 ```
 
@@ -301,21 +409,22 @@ in compose; healthcheck ships in the image; `ProtectSystem`-style
 hardening is the container boundary). nginx in front, fail2ban from day
 one — the same shape on a VPS and on EC2.
 
-**A container restart ends every live session — accepted trade, for now.**
-tmux lives in the app's container, so any container stop (deploy, crash,
-OOM, host reboot) kills the running sessions with it. A *deliberate* stop
-(SIGTERM, `docker compose stop`) is still graceful on the way out: every
-open terminal gets a `restart` message and shows "server restarting —
-reconnecting", the server exits 0 within ~5 s — but the reconnect lands on
-`no such live session` (the sessions died with the container; the client
-treats that as ended). Recovery is the sidebar's resume: nothing is lost —
-every session, finished or not, stays listed from pi's session store, and
-clicking it continues it (`pi --session <id>` appends — the transcript
-outlives the dead tmux session). Expected to improve when the
-serving/working privilege split lands
-([DESIGN_REVIEW.md](DESIGN_REVIEW.md) §1.1): tmux moves to a workspace
-container, and web restarts/deploys stop killing sessions — only
-workspace restarts will.
+**Web restarts no longer end live sessions; workspace restarts still do.**
+tmux lives in the workspace container, so a web-pi deploy, crash or OOM
+leaves every session running (open terminals get the `restart` message,
+reconnect, and reattach to the same tmux sessions — nothing died). Any
+*workspace* container stop (crash, OOM, host reboot, deliberate
+`docker compose stop workspace`) kills the running sessions with it. A
+*deliberate* stop is still graceful for the web half: every open terminal
+gets a `restart` message and shows "server restarting — reconnecting",
+the server exits 0 within ~5 s. Recovery after a workspace loss is the
+sidebar's resume: nothing is lost — every session, finished or not,
+stays listed from pi's session store, and clicking it continues it
+(`pi --session <id>` appends — the transcript outlives the dead tmux
+session). If the workspace container is merely slow to boot (or the
+socket is missing), new/resume report "workspace tmux server not running"
+instead of silently forking a server on the web side — retry once the
+workspace service is up.
 
 ### The base path
 
@@ -349,60 +458,87 @@ are `/` and `/login`.
 
 ### Updating
 
-**pi, in place — no web-pi release needed:**
+**pi** — where from depends on the install shape:
 
-```sh
-docker compose exec webpi npm install @earendil-works/pi-coding-agent@latest
-```
-
-Or click **update pi** on `/settings`: the server runs that same
-`npm install …@latest` in the app's install dir and shows the captured npm
-output and the resulting version. No restart is needed (see below).
-Concurrent updates are refused; npm missing from the server's PATH is
-reported instead of installed-around. Same caveat below either way.
+- **Split containers (the compose default):** sessions run the image's
+  vendored pi, so updating pi is updating the image: `npm install
+  @earendil-works/pi-coding-agent@latest` in your checkout, `docker
+  compose build && docker compose up -d`. The workspace container picks
+  the new binary up on the next `up` (pi is exec'd per session; running
+  sessions finish on the old one). Durable in-place updates without a
+  rebuild: keep a checkout on the workspace volume and point
+  `WEB_PI_COMMAND` at its `node_modules/.bin/pi` — `docker compose exec
+  workspace sh -c 'cd /workspace/web-pi && npm install
+  @earendil-works/pi-coding-agent@latest'` then updates just the copy
+  sessions run (the web-side code stays image-pinned — that separation is
+  the split's point). `/settings` in this shape reports the image's
+  vendored version; drift there means the workspace copy moved ahead.
+  <!-- JUNCTION task/pi-auto-update: an auto-update setting on /settings
+       lands here — in the split shape the update TARGET is the
+       workspace-side pi (image flow or WEB_PI_COMMAND checkout, above),
+       not the web container's read-only /opt/web-pi; in single-user
+       shapes it stays the in-place npm install described below. -->
+- **Single-user shapes (host install, npm global, the dev profile):**
+  `npm install @earendil-works/pi-coding-agent@latest` in the install
+  dir, or click **update pi** on `/settings` — the server runs that same
+  install in the app's install dir and shows the captured npm output and
+  the resulting version. No restart is needed: pi is exec'd per session;
+  running sessions finish on the old one. Concurrent updates are refused;
+  npm missing from the server's PATH is reported instead of
+  installed-around. (In the **docker dev profile** `node_modules` is a
+  shadow volume and `npm install` re-runs from the lockfile on every
+  boot, so an update made in place does not persist there.)
 
 Stay within the `^1` range web-pi declares (its session-listing and resume
-code is written against that major). New sessions pick the new binary up
-immediately — pi is exec'd per session, nothing restarts; running sessions
-finish on the old one. `/settings` shows the installed version; the boot
-log shows the one installed when the server started.
-Note: an app-image sync (below) re-pins pi to the lockfile — re-apply
-afterwards if you want the newer one. In the **docker dev profile**
-`node_modules` is a shadow volume and `npm install` re-runs from the
-lockfile on every boot, so an update made in place (button or `exec`) does
-not persist there.
+code is written against that major).
 
-**App code:** rebuild + `up -d`. The entrypoint hashes the image's source
-tree; on change it syncs app files into the existing volume — anything not
-in the image (`apps/`, …) survives untouched. web-pi state isn't in `/app`
-at all any more (`webpi-state` volume, above), so a sync can't reach it.
-Volumes never re-seed when content hasn't changed.
+**App code:** rebuild + `up -d` — the web container serves the image's
+`/opt/web-pi` copy, so an image rebuild IS the deploy; nothing syncs a
+running copy anymore. Volumes (`webpi-state`, `webpi-workspace`) never
+re-seed when image content changes.
 
-**Git-owned volume (self-modification, durable local edits):** the named
-volume is image-tracked — hand edits survive only until the next image
-sync. To own updates with git instead, replace the volume with a checkout:
+**Git-owned checkout (self-modification, durable local edits):** the
+image copy is root-owned by design — pi sessions can't edit it, they edit
+a checkout in the workspace instead. That is the self-modification story:
+pi edits `/workspace/<checkout>`, and a future web-side apply step (the
+management-page TODO) builds and swaps what web serves. To work that way
+today, put a checkout on the workspace volume and point
+`WEB_PI_COMMAND` at its vendored pi:
 
 ```sh
-docker compose down
-# edit compose: volumes: ["/srv/web-pi:/app"] instead of the named volume
-git clone <your-fork> /srv/web-pi
-docker compose up -d          # entrypoint sees /app/.git and never syncs
+docker compose exec workspace git clone <your-fork> /workspace/web-pi
+# compose webpi environment: WEB_PI_COMMAND=/workspace/web-pi/node_modules/.bin/pi
+docker compose exec workspace sh -c 'cd /workspace/web-pi && npm install @earendil-works/pi-coding-agent@latest && node_modules/.bin/pi --version'
+docker compose up -d
 ```
 
-Updates are then `git pull` + `npm install` + `npm run build` inside the
-container, restart to serve — which is also the workflow pi sessions use
-when they modify the app on the server (the rollback TODO builds on this).
+(The install targets pi only — it is toolchain-free, unlike a bare
+`npm install` which would compile `node-pty` and need the dev image.)
+Updates to that checkout are `git pull` + the same install inside the
+workspace container — which is also the workflow pi sessions use when
+they modify the app (the management-page TODO builds on this).
 
 ## Security model
 
 - The terminal **is** the product: anyone with the session cookie can type
-  into a shell as the app user. One user, strong password, TLS, fail2ban,
-  loopback bind + reverse proxy. Rate limits: 10 login POSTs / 15 min / IP,
+  into a shell as the sessions' user. One user, strong password, TLS,
+  fail2ban, loopback bind + reverse proxy. Rate limits: 10 login POSTs / 15 min / IP,
   30 WS connections / min / IP (in-memory), where the IP is the socket peer
   or, behind proxies, the `X-Forwarded-For` hop `WEB_PI_TRUST_PROXY`
   selects — never the client-supplied leftmost entry. Password hashing runs
   off the event loop, at most 4 at once (more get 503), so a login flood
   can't stall attached terminals.
+- **Serving and working are privilege-split by default in containers**
+  ([DESIGN_REVIEW.md](DESIGN_REVIEW.md) §1.1): pi reads untrusted input
+  (repos, web pages, tool output), so a prompt injection must not be able
+  to rewrite the server or replace the login credential. In the compose
+  shape the server runs as uid `node` off a root-owned `/opt/web-pi` and
+  never owns the tmux server; sessions run as uid 2000 in the workspace
+  container and can only reach web's state through the deliberate,
+  read-mostly `/workspace` mount. Host installs get the same guarantee
+  from the two-user setup below; a single-user install (npm global, dev
+  profile, `WEB_PI_TMUX_SOCKET` left relative) keeps the simpler one-uid
+  shape and its one-uid blast radius.
 - Auth fails closed: no credential file → no login possible.
 - **Give web-pi its own hostname.** `WEB_PI_BASE` is for path-mounting on
   a dedicated vhost (`webpi.example.com/webpi`), not for riding an
@@ -459,8 +595,10 @@ when they modify the app on the server (the rollback TODO builds on this).
 - `pi/` — the controlled pi agent-dir template (settings, MCPs, skills,
   extensions) seeded into the runtime dir; `tmux.conf` at the root is the
   tmux server config — together they're the shipped "environment config"
-- `Dockerfile`, `docker-entrypoint.sh`, `compose.yaml` — image (slim prod
-  default + toolchain dev target) and the prod/dev compose services
+- `Dockerfile`, `docker-entrypoint.sh`, `docker-workspace-entrypoint.sh`,
+  `compose.yaml` — one image, two prod roles (web: serves root-owned
+  `/opt/web-pi`; workspace: uid 2000, owns tmux + pi) + the slim prod
+  default and toolchain dev targets
 - `.agents/skills/` — Web Awesome docs as pi skills: `webawesome` (component
   API reference) + `webawesome-design` (layout/theming/tokens), copied
   version-locked from the installed package by `tools/build_webawesome_skills.py`
