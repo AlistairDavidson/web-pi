@@ -86,10 +86,7 @@ never a blind merge commit:
 3. Verify the merged tree before review: `npm ci` if the lockfile moved,
    `npm run build`, `npm run test:unit` (if the branch added one),
    `npm run test:e2e`.
-4. Spawn a fresh subagent to review `git diff --cached` — self-contained
-   brief (the task, repo conventions, what the sibling branches change).
-   Review only: it must not edit the worktree or index.
-5. Present the change as aspects with reviewer notes; the human edits and
+4. Present the change as aspects with reviewer notes; the human edits and
    discusses the staged change until satisfied. Then it lands as ONE commit
    per branch on main (the granular history stays on the `task/*` ref),
    and the next branch starts at step 1.
