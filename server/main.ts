@@ -726,30 +726,42 @@ const PING_INTERVAL_MS = 30_000;
 function attach(ws: WebSocket, token: string): void {
   trackSocket(token, ws);
   let p: Pty | null = null;
+  // Attach in flight: the spawn is one async step deeper than it used to
+  // be (the never-fork guard runs before the pty spawn), so a second
+  // {attach} frame in that window must not start a second spawn — `!p`
+  // alone can't see it yet. Cleared on the error paths so a failed attach
+  // is retryable on the same socket.
+  let starting = false;
   // The client sends {attach} and {resize} back-to-back on open, but the
   // pty only exists after an async tmux lookup — remember the requested
   // size and spawn at it, or the session opens at 80x24 inside a larger
   // browser terminal ("terminal not fitting on open").
   let size = { cols: 80, rows: 24 };
 
-  function spawnTmux(args: string[], label: string): boolean {
-    const env = Object.assign({}, process.env, {
-      TERM: 'xterm-256color', COLORTERM: 'truecolor', HOME: CFG.home,
-      PI_CODING_AGENT_DIR: CFG.agentDir,
+  function spawnTmux(args: string[], label: string): void {
+    // Never-fork gate, same as the create paths: attach is a forking
+    // tmux command too — on an absolute socket it must not run against a
+    // missing/stale socket (that forks a server as the web uid).
+    tmux.requireServer(err => {
+      if (err) { starting = false; wsSend(ws, { type: 'error', message: tmux.SERVER_NOT_RUNNING_MSG }); return; }
+      const env = Object.assign({}, process.env, {
+        TERM: 'xterm-256color', COLORTERM: 'truecolor', HOME: CFG.home,
+        PI_CODING_AGENT_DIR: CFG.agentDir,
+      });
+      let x: Pty;
+      try {
+        x = pty.spawn('tmux', [...tmux.socketArgs(tmux.SOCKET), 'attach', '-d', '-t', ...args],
+          { name: 'xterm-256color', cols: size.cols, rows: size.rows, cwd: CFG.newSessionCwd, env }) as Pty;
+      } catch (e) {
+        starting = false;
+        wsSend(ws, { type: 'error', message: 'spawn failed: ' + (e as Error).message });
+        return;
+      }
+      x.onData(d => wsSend(ws, { type: 'output', data: d }));
+      x.onExit(() => { wsSend(ws, { type: 'exit', target: label }); ws.close(); });
+      p = x;
+      wsSend(ws, { type: 'attached', target: label, socket: tmux.SOCKET });
     });
-    let x: Pty;
-    try {
-      x = pty.spawn('tmux', [...tmux.socketArgs(tmux.SOCKET), 'attach', '-d', '-t', ...args],
-        { name: 'xterm-256color', cols: size.cols, rows: size.rows, cwd: CFG.newSessionCwd, env }) as Pty;
-    } catch (e) {
-      wsSend(ws, { type: 'error', message: 'spawn failed: ' + (e as Error).message });
-      return false;
-    }
-    x.onData(d => wsSend(ws, { type: 'output', data: d }));
-    x.onExit(() => { wsSend(ws, { type: 'exit', target: label }); ws.close(); });
-    p = x;
-    wsSend(ws, { type: 'attached', target: label, socket: tmux.SOCKET });
-    return true;
   }
 
   function onMessage(msg: ClientMsg): void {
@@ -762,17 +774,22 @@ function attach(ws: WebSocket, token: string): void {
       const r = Math.min(Math.max(Math.trunc(msg.rows) || 24, 4), 200);
       size = { cols: c, rows: r };
       if (p) { try { p.resize(c, r); } catch { /* race on exit */ } }
-    } else if (msg.type === 'attach' && !p) {
+    } else if (msg.type === 'attach' && !p && !starting) {
+      starting = true;
+      const failed = (message: string): void => {
+        starting = false;
+        wsSend(ws, { type: 'error', message });
+      };
       if (msg.mode === 'live') {
         const target = msg.target;
-        if (!tmux.NAME_RE.test(target)) { wsSend(ws, { type: 'error', message: 'bad target' }); return; }
+        if (!tmux.NAME_RE.test(target)) { failed('bad target'); return; }
         tmux.hasSession(target, (_e, exists) => {
-          if (!exists) { wsSend(ws, { type: 'error', message: 'no such live session' }); return; }
+          if (!exists) { failed('no such live session'); return; }
           spawnTmux([target], target);
         });
       } else {
         const found = findSession(CFG.sessionsDir, msg.id);
-        if (!found) { wsSend(ws, { type: 'error', message: 'no such session' }); return; }
+        if (!found) { failed('no such session'); return; }
         let cwd = CFG.newSessionCwd;
         if (found.cwd) {
           try { if (fs.statSync(found.cwd).isDirectory()) cwd = found.cwd; } catch { /* fallback */ }
@@ -780,10 +797,9 @@ function attach(ws: WebSocket, token: string): void {
         const name = tmux.resumeSessionName(found.id);
         tmux.resumeSession(name, cwd, CFG.command, found.id, sessionEnv, err => {
           if (err) {
-            const message = err.message.startsWith(tmux.SERVER_NOT_RUNNING_MSG)
+            failed(err.message.startsWith(tmux.SERVER_NOT_RUNNING_MSG)
               ? tmux.SERVER_NOT_RUNNING_MSG // the never-fork guard — say it, don't bury it
-              : 'could not start resume session';
-            wsSend(ws, { type: 'error', message });
+              : 'could not start resume session');
             return;
           }
           spawnTmux([name], name);

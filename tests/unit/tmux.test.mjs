@@ -16,7 +16,7 @@ import * as path from 'node:path';
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webpi-tmux-test-'));
 process.env.WEB_PI_TMUX_SOCKET = path.join(dir, 'tmux');
 
-const { socketArgs, forksServer, isServerDown, SERVER_NOT_RUNNING_MSG,
+const { socketArgs, forksServer, isServerDown, SERVER_NOT_RUNNING_MSG, requireServer,
         newSession, resumeSession, hasSession, liveSessionNames } =
   await import('../../dist-server/src/lib/tmux.js');
 
@@ -70,6 +70,20 @@ function startServer() {
   // enough for the mechanics under test.
   fs.chmodSync(SOCKET, 0o660);
 }
+
+test('requireServer (the guard runner, absolute socket): refuses while down, passes once a server answers', { skip: !haveTmux }, async () => {
+  // The export every guarded call site (new/resume/attach spawn) uses.
+  assert.equal(fs.existsSync(SOCKET), false);
+  const refused = await new Promise(resolve => requireServer(resolve));
+  assert.ok(refused instanceof Error, 'must refuse with an error');
+  assert.ok(refused.message.startsWith(SERVER_NOT_RUNNING_MSG), refused.message);
+  assert.equal(fs.existsSync(SOCKET), false, 'must not fork a tmux server');
+  startServer();
+  const ok = await new Promise(resolve => requireServer(resolve));
+  assert.equal(ok, null);
+  execFileSync('tmux', ['-S', SOCKET, 'kill-server']);
+  fs.rmSync(SOCKET, { force: true }); // a lingering stale socket must not trip the next test
+});
 
 test('never-fork guard: no server → clear error, and NO server gets forked', { skip: !haveTmux }, async () => {
   assert.equal(tmuxUp(), false);

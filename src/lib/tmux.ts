@@ -92,16 +92,18 @@ export function isServerDown(err: (Error & { stderr?: string | Buffer }) | null)
   return !se.includes('no sessions');
 }
 
-/** Never-fork guard: before any new-session on an absolute-path socket,
- *  confirm a server actually answers; otherwise error out instead of
- *  silently forking one as this (web) uid. Relative names skip the probe
- *  entirely — fork-to-start is their documented behaviour.
- *  Residual race (accepted): the probe and the create are two commands, so
- *  a server dying between them still forks one as this uid — nothing
- *  short of a protocol change removes that window; the probe closes the
- *  steady-state case (workspace never started / crashed long ago), which
- *  is what the split must never paper over. */
-function requireServer(cb: (err: Error | null) => void): void {
+/** Never-fork gate for EVERY path that can start a tmux server as this
+ *  uid — new-session AND attach (both are forking commands in tmux):
+ *  on an absolute-path socket, first confirm a server actually answers;
+ *  otherwise error out instead of silently forking one as this (web) uid.
+ *  Relative names skip the probe entirely — fork-to-start is their
+ *  documented behaviour.
+ *  Residual race (accepted): the probe and the follow-up command are two
+ *  steps, so a server dying between them still forks one as this uid —
+ *  nothing short of a protocol change removes that window; the probe
+ *  closes the steady-state case (workspace never started / crashed long
+ *  ago), which is what the split must never paper over. */
+export function requireServer(cb: (err: Error | null) => void): void {
   if (forksServer(SOCKET)) { cb(null); return; }
   tmux(SOCKET, ['list-sessions'], err => {
     cb(isServerDown(err)

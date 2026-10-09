@@ -385,19 +385,21 @@ you installed from. Current installs (state already on `/state`:
 ```sh
 docker compose down
 docker compose build   # the new users exist only in the NEW image — build first
-docker compose run --rm --user 0:0 --entrypoint sh webpi -c \
+docker compose run --rm --user 0:0 --volume webpi-state:/state --entrypoint sh workspace -c \
   'mv /state/pi-agent /workspace/pi-agent && chown -R 2000:2001 /workspace/pi-agent'
 docker compose up -d
 ```
 
-Older installs (state sat on the now-unused `webpi-app` volume under
-`/app`) move both halves:
+(`run` goes through the **workspace** service — its `/workspace` mount is
+read-write, while webpi's is `:ro`; `--volume` adds the state volume it
+doesn't otherwise carry.) Older installs (state sat on the now-unused
+`webpi-app` volume under `/app`) move both halves:
 
 ```sh
 # container: state sat on the (now unused) webpi-app volume under /app
 docker compose down
 docker compose build   # the new users + node-owned /state exist only in the NEW image — build first
-docker compose run --rm --user 0:0 --volume webpi-app:/old-app --entrypoint sh webpi -c \
+docker compose run --rm --user 0:0 --volume webpi-app:/old-app --volume webpi-state:/state --entrypoint sh workspace -c \
   'mv /old-app/webpi.db /state/webpi.db && mv /old-app/.pi-agent /workspace/pi-agent && chown node:node /state/webpi.db && chown -R 2000:2001 /workspace/pi-agent'
 docker compose up -d
 ```
@@ -539,11 +541,13 @@ edits and the future apply step builds from.
   to rewrite the server or replace the login credential. In the compose
   shape the server runs as uid `node` off a root-owned `/opt/web-pi` and
   never owns the tmux server; sessions run as uid 2000 in the workspace
-  container and can only reach web's state through the deliberate,
-  read-mostly `/workspace` mount. Host installs get the same guarantee
-  from the two-user setup below; a single-user install (npm global, dev
-  profile, `WEB_PI_TMUX_SOCKET` left relative) keeps the simpler one-uid
-  shape and its one-uid blast radius.
+  container and cannot reach the server's state at all — web's
+  `/workspace` mount is its read-only view of the *sessions'* store
+  (sidebar/resume), not a bridge in the other direction, and the login
+  db on `/state` is mounted only on the web container. Host installs get
+  the same guarantee from the two-user setup below; a single-user install
+  (npm global, dev profile, `WEB_PI_TMUX_SOCKET` left relative) keeps the
+  simpler one-uid shape and its one-uid blast radius.
 - Auth fails closed: no credential file → no login possible.
 - **Give web-pi its own hostname.** `WEB_PI_BASE` is for path-mounting on
   a dedicated vhost (`webpi.example.com/webpi`), not for riding an
