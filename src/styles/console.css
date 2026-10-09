@@ -256,7 +256,7 @@ jobs-app { display: block; min-height: 100dvh; }
 }
 .jobs-header h1 wa-icon { color: var(--wa-color-brand-fill-normal); }
 .jobs-sub { color: var(--wa-color-text-quiet); margin: 0; }
-.jobs-sub code, .job-meta code, #jobs-degraded code {
+.jobs-sub code, .job-meta code {
   font-family: var(--wa-font-family-code);
   background: var(--wa-color-surface-lowered);
   border: var(--wa-border-width-s) solid var(--wa-color-surface-border);
@@ -264,7 +264,6 @@ jobs-app { display: block; min-height: 100dvh; }
   padding: var(--wa-space-3xs) var(--wa-space-2xs);
   overflow-wrap: anywhere;
 }
-.jobs-degraded-detail { color: var(--wa-color-text-quiet); }
 .jobs-empty {
   color: var(--wa-color-text-quiet); margin: 0;
   padding: var(--wa-space-m); text-align: center;
