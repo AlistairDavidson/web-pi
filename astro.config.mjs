@@ -12,7 +12,8 @@ import { envSchema } from './src/lib/env-schema';
 // keeps serving the REST API + WS→node-pty bridge itself. One process.
 //
 // WEB_PI_BASE is baked into the pages at build time — for subpath deploys
-// (e.g. riding an existing site at /console) set it before `npm run build`
+// (e.g. /console on a dedicated vhost; the app wants its own hostname,
+// see README "Security model") set it before `npm run build`
 // AND at server runtime; the pages and the server must agree.
 const base = process.env.WEB_PI_BASE ?? '/';
 

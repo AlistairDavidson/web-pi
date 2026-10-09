@@ -142,8 +142,8 @@ directly.
 |---|---|---|
 | `WEB_PI_HOST` | `127.0.0.1` | Listen address (loopback + reverse proxy is the intended shape) |
 | `WEB_PI_PORT` | `3000` | Listen port |
-| `WEB_PI_TRUST_PROXY` | `0` | Reverse-proxy hops in front of the server (nginx = `1`, ALB → nginx = `2`). The login/WS rate limits key on the client IP that many entries from the right of `X-Forwarded-For`; `0` ignores the header and uses the socket peer. Set it to match your proxies: too low and every client shares the proxy's bucket, too high and clients can pick their own |
-| `WEB_PI_BASE` | `/` | URL base path, e.g. `/console` when riding an existing site. **Baked into the pages at build time** — set it before `npm run build` *and* at runtime |
+| `WEB_PI_TRUST_PROXY` | `0` | Reverse-proxy hops in front of the server (nginx = `1`, ALB → nginx = `2`). The login/WS rate limits key on the client IP that many entries from the right of `X-Forwarded-For`; the origin check also derives its scheme from the `X-Forwarded-Proto` hop it selects (see [Security model](#security-model)); `0` ignores the headers and uses the socket peer. Set it to match your proxies: too low and every client shares the proxy's bucket, too high and clients can pick their own |
+| `WEB_PI_BASE` | `/` | URL base path, e.g. `/console` on a dedicated vhost (the app wants its own hostname — see [Security model](#security-model)). **Baked into the pages at build time** — set it before `npm run build` *and* at runtime |
 | `WEB_PI_HOME` | `os.homedir()` | `HOME` for spawned processes (tmux, pi) |
 | `WEB_PI_STATE_DIR` | `$WEB_PI_HOME/.local/state/web-pi` | one directory for all web-pi state: the sqlite db (`webpi.db`) and the runtime `pi-agent/` (pi credentials + sessions). Per-path overrides (`WEB_PI_DB_FILE`, `WEB_PI_AGENT_DIR`) still win. In the container compose points it at `/state` on a dedicated volume |
 | `WEB_PI_AGENT_DIR` | `<state dir>/pi-agent` | runtime pi agent dir (config, credentials, sessions for spawned pi) — seeded from the repo's `pi/` template where absent (a stray `PI_CODING_AGENT_DIR` in the server's env is ignored with an error logged) |
@@ -322,6 +322,37 @@ when they modify the app on the server (the rollback TODO builds on this).
   off the event loop, at most 4 at once (more get 503), so a login flood
   can't stall attached terminals.
 - Auth fails closed: no credential file → no login possible.
+- **Give web-pi its own hostname.** `WEB_PI_BASE` is for path-mounting on
+  a dedicated vhost (`console.example.com/console`), not for riding an
+  existing site: on a shared host every same-origin XSS — anywhere on that
+  host — reads this app's responses and drives the terminal, and on this
+  app a shell is the product. A cookie `Path` is no boundary to
+  same-origin scripts.
+- **Origin checks:** every non-GET request with a present-but-mismatched
+  `Origin` is rejected (403) before anything else runs; requests without
+  an `Origin` (curl, API clients) pass. WebSocket upgrades must carry a
+  matching `Origin` at all — there is no Origin-free path, so no
+  curl/websocat terminals and no cross-site WebSocket hijacking from a
+  sibling subdomain (same-site but not same-origin — the defence
+  `SameSite=Strict` doesn't provide). The expected origin is derived per
+  request from `Host` + `X-Forwarded-Proto`, the latter honoured only when
+  `WEB_PI_TRUST_PROXY` trusts it (same right-most-hop selection as the
+  rate limits' `X-Forwarded-For` reading). Each proxy hop must *forward*
+  the original `X-Forwarded-Proto`, never replace it — nginx behind a
+  TLS-terminating front (ALB) must pass `$http_x_forwarded_proto`
+  through, not `$scheme`: a replaced proto disagrees with the browser's
+  `Origin` and the app fails closed (403s), by design.
+- **Security headers** on every response the app itself sends (pages,
+  assets, API, redirects, upgrade rejections — host installs get them
+  without nginx): CSP `default-src 'self'; script-src 'self'; style-src
+  'self' 'unsafe-inline'; connect-src 'self' wss:; frame-ancestors
+  'none'` (Astro bundles all scripts as same-origin modules; xterm and
+  Lit inject styles at runtime, hence the style exception), plus
+  `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`,
+  `Referrer-Policy: same-origin`. The Web Awesome icon glyphs are vendored
+  into `public/icons/wa/` and resolved from there client-side — nothing
+  loads from the Font Awesome CDN, so the strict CSP holds and no usage
+  leaks to a third party.
 - Static assets are served from a fixed route table with traversal checks;
   request bodies are size-capped.
 - Past-session previews read only file heads (first user message, capped at

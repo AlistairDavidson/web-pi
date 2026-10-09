@@ -1,11 +1,5 @@
 apps folder that contains git submodules
 
-browser hardening (DESIGN_REVIEW 1.2):
-- Origin check on the WS upgrade and every non-GET request: expected origin derived from Host + X-Forwarded-Proto (honour WEB_PI_TRUST_PROXY); present-and-mismatched → 403 / destroy socket. Plain HTTP requests without Origin (curl etc.) pass; WS upgrades REQUIRE an Origin header (browser clients only — no curl/websocat terminals)
-- security headers on every response from the app itself (not nginx, so host/Docker installs both get them): CSP default-src 'self'; script-src 'self' (no inline scripts exist); style-src 'self' 'unsafe-inline' (xterm + Lit inject styles); connect-src 'self' wss:; frame-ancestors 'none' + X-Frame-Options DENY + X-Content-Type-Options nosniff + Referrer-Policy same-origin
-- vendor the wa-icon glyphs in-project (registerIconLibrary from local files) — prerequisite for the strict CSP, and kills the CDN usage leak (subsumes the old 'Don't load fontawesome icons' item)
-- README: WEB_PI_BASE stays (path-mounting on a dedicated vhost), but drop the 'ride an existing site' advice — own hostname, and warn that same-origin XSS on the host = shell
-
 session lifecycle + graceful shutdown (DESIGN_REVIEW 1.3/1.4):
 - track WebSockets per token (Map<token, Set<ws>> fed by the upgrade handler); POST /logout closes them — terminal gets a final "signed out" message, then the socket closes
 - expiry model: sliding 7 d idle (as now) + 30 d absolute cap from login (Map<token, {exp, created}>) + cookie Max-Age refreshed on authed responses so browser and server agree; stolen token dies within 30 d even under constant use
@@ -36,7 +30,6 @@ management page (replaces the panic-endpoint idea) — rollback AND applying cha
 - the one unmodifiable part of the software: programmatic enforcement — the apply step rejects any patch that changes it from within the container; it can only be modified in the original project
 - whole page, designed after the split lands (its "protected from modification" property is exactly what the split makes enforceable); handles picking a git commit, rebuilding, swapping, basic feedback
 
-Don't load fontawesome icons from fontawesome - everything in-project (superseded by browser hardening above)
 
 group sessions by app
 ignore pi sessions not related to this project or one of its apps
