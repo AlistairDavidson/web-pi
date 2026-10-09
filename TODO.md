@@ -22,8 +22,6 @@ in-process job scheduler (DESIGN_REVIEW 3.1) — replaces systemd user units:
 
 deployment docs (DESIGN_REVIEW 2/3.1): document VPS/Docker as the recommended shape and single-EC2-with-Docker for AWS; say nothing about ECS (single-host-only note where deploy is discussed). No ECS-specific code — the SIGTERM handler and state dir arrive via the other TODOs anyway
 
-/api/state perf: title cache keyed by (path, mtime) + async fs.promises scan — today the sidebar poll stats every session file and synchronously reads up to 200×64 KiB per open tab per 15 s, stalling the event loop (~40 ms @ 638 files on SSD, seconds on network storage) and freezing terminal traffic with it
-
 update pi button, auto-update setting
 
 privilege split: serving vs working (DESIGN_REVIEW 1.1) — before apps and self-modification are built on top:
