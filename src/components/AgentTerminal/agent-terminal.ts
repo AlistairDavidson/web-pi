@@ -194,6 +194,13 @@ export class AgentTerminal extends HTMLElement {
       }
       else if (m.type === 'error') { ended = true; this.status(m.message, 'err'); this.terminal?.write(`\r\n\u001b[31m${m.message}\u001b[0m\r\n`); }
       else if (m.type === 'exit') { ended = true; this.status(`detached: ${m.target}`, 'info'); }
+      // The token this socket used was dropped (logout / log out
+      // everywhere): final — like 'exit', never reconnected.
+      else if (m.type === 'signed-out') {
+        ended = true;
+        this.status('signed out', 'info');
+        this.terminal?.write('\r\nsigned out\r\n');
+      }
     };
 
     websocket.onclose = () => {

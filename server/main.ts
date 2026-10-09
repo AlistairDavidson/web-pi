@@ -136,8 +136,9 @@ function send(res: http.ServerResponse, code: number, body: string,
   res.writeHead(code, { 'Cache-Control': 'no-store', ...headers });
   res.end(body);
 }
-function sendJSON(res: http.ServerResponse, code: number, obj: unknown): void {
-  send(res, code, JSON.stringify(obj), { 'Content-Type': 'application/json' });
+function sendJSON(res: http.ServerResponse, code: number, obj: unknown,
+  headers?: Record<string, string>): void {
+  send(res, code, JSON.stringify(obj), { 'Content-Type': 'application/json', ...headers });
 }
 function sendClientFile(res: http.ServerResponse, rel: string, cache: boolean): void {
   // rel is from a fixed route table or validated against traversal below.
@@ -194,6 +195,9 @@ function underBase(url: string): boolean {
 function authed(req: http.IncomingMessage): boolean {
   return auth.valid(Auth.parseCookies(req.headers.cookie).webpi_session);
 }
+/** Header that clears the browser's session cookie (logout, log out everywhere). */
+const clearSessionCookie = (): string =>
+  `webpi_session=; HttpOnly; Secure; SameSite=Strict; Path=${CFG.base}; Max-Age=0`;
 
 // ---------- Astro SSR (middleware) ----------
 // The Astro build emits an ESM handler (dist/server/entry.mjs); loaded once
@@ -256,10 +260,12 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
   }
 
   if (req.method === 'POST' && url === route('/logout')) {
-    auth.drop(Auth.parseCookies(req.headers.cookie).webpi_session);
-    send(res, 200, 'ok', {
-      'Set-Cookie': `webpi_session=; HttpOnly; Secure; SameSite=Strict; Path=${CFG.base}; Max-Age=0`,
-    });
+    const token = Auth.parseCookies(req.headers.cookie).webpi_session;
+    auth.drop(token);
+    // Logout must end the terminals this token authenticated, not just
+    // future requests: they get 'signed-out' and don't reconnect.
+    if (token) closeTokenSockets(token, { type: 'signed-out' });
+    send(res, 200, 'ok', { 'Set-Cookie': clearSessionCookie() });
     return;
   }
 
@@ -300,7 +306,22 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
     return;
   }
 
+  // 'Log out everywhere' (/settings): every token dies and every
+  // terminal ends — suspected-cookie-theft recovery in one click. This
+  // browser's cookie is cleared too.
+  if (req.method === 'POST' && url === route('/api/logout-all')) {
+    auth.dropAll();
+    closeAllSockets({ type: 'signed-out' });
+    send(res, 200, 'ok', { 'Set-Cookie': clearSessionCookie() });
+    return;
+  }
+
   if (req.method === 'GET' && url === route('/api/state')) {
+    // The poll every open tab makes every 15 s: the one authed response
+    // that re-arms the browser cookie's Max-Age when it has drifted near
+    // half the sliding window (auth.cookieRefresh decides — see the
+    // justification there).
+    const refresh = auth.cookieRefresh(Auth.parseCookies(req.headers.cookie).webpi_session, CFG.base);
     const sessList = listSessions(CFG.sessionsDir);
     tmux.listSessions((err, live) => {
       const state: ConsoleState = {
@@ -309,7 +330,7 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
         sessions: sessList.map(s => ({ ...s, hidden: hiddenSessions.has(s.id) })),
         hiddenCount: hiddenSessions.size,
       };
-      sendJSON(res, 200, state);
+      sendJSON(res, 200, state, refresh === null ? undefined : { 'Set-Cookie': refresh });
     });
     return;
   }
@@ -465,14 +486,61 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
 // ---------- WebSocket → node-pty → tmux attach ----------
 const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
 
+// Live sockets per session token, fed by the upgrade handler (which has
+// already validated it): POST /logout, log-out-everywhere and shutdown
+// must end the terminals a token authenticated — not merely stop future
+// requests — and shutdown must be able to reach every client.
+const socketsByToken = new Map<string, Set<WebSocket>>();
+
+function trackSocket(token: string, ws: WebSocket): void {
+  let set = socketsByToken.get(token);
+  if (!set) { set = new Set(); socketsByToken.set(token, set); }
+  set.add(ws);
+}
+function untrackSocket(token: string, ws: WebSocket): void {
+  const set = socketsByToken.get(token);
+  if (!set) return;
+  set.delete(ws);
+  if (set.size === 0) socketsByToken.delete(token);
+}
+
+/** Close with a hard fallback: a peer that never answers the close frame
+ *  (dead client, or a script holding a stolen token) is terminated — a
+ *  logout/shutdown can't leave a live terminal behind on a limp socket. */
+function closeSoon(ws: WebSocket): void {
+  try { ws.close(); } catch { /* already closed */ }
+  setTimeout(() => { try { ws.terminate(); } catch { /* gone */ } }, 1500).unref();
+}
+
+/** Send `final`, then end every socket authenticated with `token`. */
+function closeTokenSockets(token: string, final: ServerMsg): void {
+  const set = socketsByToken.get(token);
+  if (!set) return;
+  socketsByToken.delete(token);
+  for (const ws of set) { wsSend(ws, final); closeSoon(ws); }
+}
+
+/** Send `final`, then end every socket, whichever token it used. */
+function closeAllSockets(final: ServerMsg): void {
+  for (const set of socketsByToken.values()) {
+    for (const ws of set) { wsSend(ws, final); closeSoon(ws); }
+  }
+  socketsByToken.clear();
+}
+
+// Graceful shutdown state (sequence at the bottom, by server.listen).
+let shuttingDown = false;
+
 server.on('upgrade', (req, socket, head) => {
   const url = (req.url ?? '').split('?')[0]!;
   if (url !== route('/ws')) { socket.destroy(); return; }
+  if (shuttingDown) { socket.destroy(); return; } // stopping: no new terminals
   if (!wsLimiter.allow(ipOf(req))) { socket.destroy(); return; }
-  if (!auth.valid(Auth.parseCookies(req.headers.cookie).webpi_session)) {
+  const token = Auth.parseCookies(req.headers.cookie).webpi_session;
+  if (!auth.valid(token)) {
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return;
   }
-  wss.handleUpgrade(req, socket, head, ws => attach(ws));
+  wss.handleUpgrade(req, socket, head, ws => attach(ws, token!));
 });
 
 interface Pty { write(d: string): void; resize(c: number, r: number): void; kill(): void;
@@ -511,7 +579,8 @@ function parseClientMsg(raw: string): ClientMsg | null {
 // tick means the peer is gone — terminate, and the pty is reaped.
 const PING_INTERVAL_MS = 30_000;
 
-function attach(ws: WebSocket): void {
+function attach(ws: WebSocket, token: string): void {
+  trackSocket(token, ws);
   let p: Pty | null = null;
   // The client sends {attach} and {resize} back-to-back on open, but the
   // pty only exists after an async tmux lookup — remember the requested
@@ -589,6 +658,7 @@ function attach(ws: WebSocket): void {
   }, PING_INTERVAL_MS);
 
   ws.on('close', () => {
+    untrackSocket(token, ws);
     clearInterval(keepalive);
     if (p) { try { p.kill(); } catch { /* already gone */ } }
   });
@@ -604,3 +674,4 @@ server.listen(CFG.port, CFG.host, () => {
       console.log(err ? `pi: version check failed (${(err as Error).message})` : `pi ${String(out).trim()}`));
   }
 });
+
