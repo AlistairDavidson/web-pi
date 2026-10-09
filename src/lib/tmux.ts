@@ -2,11 +2,11 @@
 // The app owns ONE socket (default "web-pi"): the tmux server starts on
 // first new-session and dies with the last session (exit-empty). Closing
 // the browser tab detaches; sessions keep running under tmux.
-// Pattern note: a LONG-LIVED systemd-supervised session should get its
-// OWN socket + unit — never share this one, or a crashing supervised
-// session would leave its unit looking "active". Scheduled-job runs are
-// the sanctioned exception (src/lib/jobs.ts): their units are oneshots
-// that exit with the run, and sharing this socket is precisely what makes
+// Pattern note: a LONG-LIVED externally-supervised session should get
+// its OWN socket + supervisor — never share this one, or a crashing
+// supervised session would look "alive". Scheduled-job runs are the
+// sanctioned exception (src/lib/jobs.ts): the run is the session, it
+// dies with the command, and sharing this socket is precisely what makes
 // runs appear in the Live list next to interactive sessions.
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -38,27 +38,9 @@ export function resumeSessionName(id: string): string {
 }
 
 /** Session name a scheduled job's run opens on this socket (src/lib/jobs.ts
- *  bakes it into its unit files; the Live list shows it like any session). */
+ *  fires runs under it; the Live list shows it like any session). */
 export function jobSessionName(job: string): string {
   return `webpi-${job}`;
-}
-
-/** Absolute tmux path for unit files (cached) — systemd user units run with
- *  a spartan PATH, so a bare "tmux" may not resolve there. */
-export function tmuxPath(): Promise<string> {
-  tmuxPathCached ??= new Promise(resolve => {
-    execFile('/bin/sh', ['-c', 'command -v tmux'], { timeout: 5000 }, (err, out) => {
-      resolve(!err && String(out).trim() ? String(out).trim() : 'tmux');
-    });
-  });
-  return tmuxPathCached;
-}
-let tmuxPathCached: Promise<string> | null = null;
-
-/** Leading argv every unit-file tmux invocation needs: the server config
- *  (when present) and the app's socket. Mirrors the tmux() wrapper above. */
-export function baseArgs(): string[] {
-  return [...(fs.existsSync(CONF) ? ['-f', CONF] : []), '-L', SOCKET];
 }
 
 type Cb<T> = (err: Error | null, out: T) => void;

@@ -3,7 +3,6 @@ import "@awesome.me/webawesome/dist/components/button/button.js";
 import "@awesome.me/webawesome/dist/components/icon/icon.js";
 import "@awesome.me/webawesome/dist/components/card/card.js";
 import "@awesome.me/webawesome/dist/components/badge/badge.js";
-import "@awesome.me/webawesome/dist/components/callout/callout.js";
 import "@awesome.me/webawesome/dist/components/dialog/dialog.js";
 import "@awesome.me/webawesome/dist/components/input/input.js";
 import "@awesome.me/webawesome/dist/components/textarea/textarea.js";
@@ -26,22 +25,12 @@ import "@awesome.me/webawesome/dist/components/toast/toast.js";
       </div>
     </header>
     <p class="jobs-sub">
-      A job is a systemd user timer (<code>webpi-&lt;name&gt;.timer</code>) that
-      runs a shell command inside a tmux session on the app's socket — every run
-      shows up in the console's <strong>Live</strong> list and is attachable,
-      just like a session you started yourself.
+      A job is a name, a 5-field <code>cron</code> schedule and a shell
+      command, run by web-pi's built-in scheduler inside a tmux session on
+      the app's socket — every run shows up in the console's
+      <strong>Live</strong> list and is attachable, just like a session you
+      started yourself.
     </p>
-    <wa-callout id="jobs-degraded" variant="warning" class="hidden">
-      <wa-icon slot="icon" name="triangle-exclamation"></wa-icon>
-      <strong>scheduled jobs are unavailable here.</strong>
-      <br />
-      web-pi manages jobs through <code>systemctl --user</code>, and this server
-      can't reach a systemd user session (containers typically have none). On
-      the host: run web-pi on a systemd box as your own user and{" "}
-      <code>loginctl enable-linger $USER</code>
-      if it should fire while you're logged out.
-      <span id="jobs-degraded-detail" class="jobs-degraded-detail"></span>
-    </wa-callout>
     <div id="jobs-list" class="wa-stack wa-gap-s"></div>
   </div>
 
@@ -52,14 +41,14 @@ import "@awesome.me/webawesome/dist/components/toast/toast.js";
         label="name"
         placeholder="nightly-check"
         maxlength="40"
-        hint="units are created as webpi-<name>.service + webpi-<name>.timer"
+        hint="runs open in tmux session webpi-<name>"
       ></wa-input>
       <div>
         <wa-input
           id="job-schedule"
-          label="schedule (systemd OnCalendar)"
-          placeholder="Mon..Fri 09:00"
-          hint="hourly · daily 08:00 · Mon..Fri 09:30 · *-*-* 12:30:00"
+          label="schedule (cron)"
+          placeholder="*/5 * * * *"
+          hint="*/5 * * * * · 0 8 * * * · 30 9 * * 1-5"
         ></wa-input>
         <div
           id="schedule-feedback"

@@ -6,14 +6,6 @@ session lifecycle + graceful shutdown (DESIGN_REVIEW 1.3/1.4):
 - "log out everywhere" button on /settings: clears every token, closes every socket (recovery after suspected cookie theft)
 - SIGTERM/SIGINT handler: stop accepting connections, send a new 'restart' WS message then close each socket, exit after drain with a short deadline (clients show "server restarting — reconnecting" and the existing backoff reattach lands back on the session)
 
-sqlite landed (webpi.db: auth + hidden-sessions, node:sqlite, no WAL; under WEB_PI_STATE_DIR) — remaining: absorb job bookkeeping when the in-process scheduler lands
-
-in-process job scheduler (DESIGN_REVIEW 3.1) — replaces systemd user units:
-- drop systemd jobs.ts (unit files, systemctl, systemd-analyze); scheduler runs inside the server, keeping the run-inside-tmux behaviour (runs open on the shared socket — works in container, host, and the future two-container split)
-- persistence: last-fired per job in the webpi.db state db (job_runs table — the DB exists now); on boot, compare last-fired against the schedule window and fire missed runs (systemd Persistent=true equivalent)
-- cron-syntax validation moves in-app (small parser dep like cron-parser, or a restricted syntax we validate ourselves) — systemd-analyze is gone with systemd
-- supercronic considered and rejected: same availability as in-process (dies with the container), no catch-up, plus crontab-rewrite/HUP coordination and an extra binary per install shape
-
 deployment docs (DESIGN_REVIEW 2/3.1): document VPS/Docker as the recommended shape and single-EC2-with-Docker for AWS; say nothing about ECS (single-host-only note where deploy is discussed). No ECS-specific code — the SIGTERM handler and state dir arrive via the other TODOs anyway
 
 update pi button, auto-update setting
@@ -87,6 +79,7 @@ installation instructions / script for agents / actual scripts
 playwright
 fuzz based integration testing
 
+winston logging and some kind of observability
 
 Human:
 make sidebar much nicer - rebuild step by step

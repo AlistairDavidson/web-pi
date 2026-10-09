@@ -36,9 +36,9 @@ tmux socket ── session per tab ── pi ── ~/.pi/agent/sessions/
   touches pi's store) and is reversible via "N hidden — manage".
 - **Live** — running tmux sessions on the app's socket; click to attach
   (`attach -d`).
-- **Jobs** (`/jobs`) — scheduled commands ("cron") on systemd **user**
-  timers: name + `OnCalendar` schedule + arbitrary shell command. Every
-  run — timer-fired or "run now" — opens in a tmux session on the app's
+- **Jobs** (`/jobs`) — scheduled commands ("cron") on the built-in
+  scheduler: name + 5-field cron schedule + arbitrary shell command. Every
+  run — scheduler-fired or "run now" — opens in a tmux session on the app's
   socket, so it shows up in Live and is attachable like any session.
 - **Settings** — `/settings`: read-only dashboard of the effective config
   (listen address, paths, versions) plus one action, a manual update-pi
@@ -54,9 +54,6 @@ tmux socket ── session per tab ── pi ── ~/.pi/agent/sessions/
   `node-pty`: build-essential / g++ / python3)
 - `tmux` on PATH — pi ships as an npm dependency (`npm install` vendors it)
 - Linux (node-pty + tmux; developed on Debian)
-- Optional, for `/jobs` only: a systemd **user** session reachable from the
-  server process (`systemctl --user`). The Docker container has none — the
-  jobs page degrades to an explanatory notice instead of erroring.
 
 ## Quick start
 
@@ -152,9 +149,7 @@ directly.
 | `WEB_PI_COMMAND` | `<app root>/node_modules/.bin/pi` (falls back to `pi` on PATH) | command run in a new session (whitespace-split; resume appends `--session <id>` — only pi-family CLIs support that) |
 | `WEB_PI_TMUX_SOCKET` | `web-pi` | the tmux socket the app owns |
 | `WEB_PI_TMUX_CONF` | `<app root>/tmux.conf` | tmux server config, applied when the tmux server starts (escape-time, scrollback, truecolour — see the file) |
-| `WEB_PI_DB_FILE` | `<state dir>/webpi.db` | sqlite state db (0600): login credential + `sessions` overlay table (hidden flags — per-session metadata lands there later). Fresh setup: `npm run set-password` creates it |
-| `WEB_PI_SYSTEMCTL` | `systemctl` | binary used for scheduled jobs (override for tests/odd distros) |
-| `WEB_PI_SYSTEMD_ANALYZE` | `systemd-analyze` | binary used to validate OnCalendar specs |
+| `WEB_PI_DB_FILE` | `<state dir>/webpi.db` | sqlite state db (0600): login credential, `sessions` overlay table (hidden flags), scheduled-job tables (`jobs`, `job_runs` — the in-process scheduler). Fresh setup: `npm run set-password` creates it |
 | `WEB_PI_CLIENT_DIR` | `<app root>/dist/client` | Astro hashed assets |
 | `WEB_PI_ASTRO_ENTRY` | `<app root>/dist/server/entry.mjs` | Astro SSR handler |
 | `WEB_PI_DEV_API` | `http://127.0.0.1:3001` | dev only: where `astro dev` proxies `/api`, `/ws`, login/logout (the `npm run dev:server` process) |
@@ -163,42 +158,35 @@ Run under a dedicated unprivileged user (the app spawns a terminal — treat
 it as a web shell by design). Don't run it as root, don't put a sudo-wielding
 user behind it.
 
-## Scheduled jobs (/jobs) — systemd user units
+## Scheduled jobs (/jobs) — the in-process scheduler
 
-The jobs page is cron-with-a-face: each job is a **name**, an **OnCalendar
-schedule** (validated live with `systemd-analyze calendar`) and an arbitrary
-**shell command**. Storage and execution are plain systemd user units —
-no daemon, no bindings, no sudo:
+The jobs page is cron-with-a-face: each job is a **name**, a **5-field
+cron schedule** (`minute hour day-of-month month day-of-week`, validated
+live in-app with [cron-parser](https://www.npmjs.com/package/cron-parser))
+and an arbitrary **shell command**. Jobs live in the sqlite state db
+(`jobs` table; one `job_runs` bookkeeping row per fire) and are fired by
+a scheduler inside the server process — no systemd, no extra daemon, so
+jobs work in every install shape, the container included.
 
-- `~/.config/systemd/user/webpi-<name>.service` — `Type=oneshot`; its
-  `ExecStart` opens the command inside `tmux new-session -d -s webpi-<name>`
-  on the app's own socket (with the same `-f` conf, cwd and
-  `PI_CODING_AGENT_DIR` env a main-page session gets, baked in at save
-  time). Runs therefore appear in **Live** and attach like any session —
+- **Firing**: the scheduler ticks every ~30s and opens due jobs with
+  `tmux new-session -d -s webpi-<name>` on the app's own socket (same
+  `-f` conf, cwd and `PI_CODING_AGENT_DIR` env a main-page session
+  gets). Runs therefore appear in **Live** and attach like any session —
   including runs that fired while you had no browser open.
-- `~/.config/systemd/user/webpi-<name>.timer` — `OnCalendar=`, `Persistent=true`
-  (missed fires catch up after downtime), wanted by `timers.target`.
-
-Ownership convention (enforced, not just convention): the page only ever
-sees and manages units named `webpi-*` — every unit name it passes to
-`systemctl` is built by one validating helper, and listing only reads
-`webpi-*.timer` files that match it. Other user units are invisible and
-untouchable; conversely, hand-editing a `webpi-*` unit is fair game (the
-page parses the files back for schedule/command display).
-
-Run semantics: a fire is **skipped** while the previous run's tmux session
-is still alive (`ExecStart` is `-`-prefixed, so a duplicate session name is
-not an error) — long-running agent jobs don't pile up. "Run now" checks and
-returns 409 in that case. Deleting a job stops/disables/removes its units
-but deliberately leaves a live run's session alone.
-
-Requirements & degraded mode: the server needs to reach a systemd **user**
-manager (`systemctl --user`). On a normal host that means: run web-pi as
-yourself, and `loginctl enable-linger $USER` if timers should fire while
-you're not logged in (the usual case for a server box). Where no user
-session exists — the Docker container, WSL1, a chroot — the page shows an
-explanatory notice, `GET /api/jobs` reports `available:false`, and the
-mutating endpoints answer 503 instead of failing noisily.
+- **Downtime catch-up**: each fire is recorded in `job_runs`; on boot the
+  scheduler compares the last fire against the schedule and fires **one**
+  catch-up run per job whose window passed while the server was down —
+  systemd's `Persistent=true` equivalent, deliberately capped at one run
+  (a job that missed three dailies runs once, not three times).
+- **Run semantics**: a fire is **skipped** while the previous run's tmux
+  session is still alive — long-running agent jobs don't pile up. "Run
+  now" checks and returns 409 in that case. Deleting a job removes its
+  definition and run history but deliberately leaves a live run's
+  session alone.
+- The trade-off vs the old systemd timers: nothing fires while web-pi
+  itself is down (hence the catch-up above). Job commands run as the
+  web-pi user, on the app's socket, per the security model — the terminal
+  is the product.
 
 ## Pi: dependency & config isolation
 
@@ -368,11 +356,12 @@ when they modify the app on the server (the rollback TODO builds on this).
   `<agent-terminal>` (xterm.js island); each static shell is SSR'd by an
   Astro wrapper (`ConsoleApp.astro`, `AgentTerminal.astro`)
 - `src/lib` — shared strict TS: auth (scrypt + sessions + rate limiter),
-  tmux helpers, pi session-store parser, systemd scheduled jobs, wire types,
+  tmux helpers, pi session-store parser, scheduled jobs (in-process
+  scheduler), wire types,
   typed env schema + reads (`env-schema.ts` / `env.ts`, the `WEB_PI_*` contract)
 - `server` — the Node server: Astro SSR (middleware) + assets + REST + WS → node-pty → tmux
 - `src/pages/jobs.astro` + `src/components/JobsApp/` — the scheduled-jobs
-  page (list/create/edit/run/delete, OnCalendar validation, degraded notice)
+  page (list/create/edit/run/delete, cron validation)
 - `pi/` — the controlled pi agent-dir template (settings, MCPs, skills,
   extensions) seeded into the runtime dir; `tmux.conf` at the root is the
   tmux server config — together they're the shipped "environment config"

@@ -32,45 +32,48 @@ export interface ConsoleState {
   hiddenCount: number;
 }
 
-// ---- scheduled jobs (systemd user units — see src/lib/jobs.ts) ----
+// ---- scheduled jobs (in-process scheduler — see src/lib/jobs.ts) ----
 
 export interface ScheduledJob {
-  /** job name (unit stem: webpi-<name>.service/.timer) */
+  /** job name (run sessions: webpi-<name> on the app's tmux socket) */
   name: string;
-  /** OnCalendar spec */
+  /** 5-field cron (minute hour day-of-month month day-of-week) */
   schedule: string;
   /** shell command a run executes (inside tmux session webpi-<name>) */
   command: string;
-  /** timer armed */
+  /** schedule armed and parses (false only for a hand-edited db row) */
   active: boolean;
   /** the run's tmux session is alive (visible in Live) */
   running: boolean;
   /** tmux session name a run opens */
   session: string;
-  /** next elapse, human-formatted by systemd; null when unknown */
+  /** next fire from the cron schedule, local "YYYY-MM-DD HH:mm"; null when unknown */
   next: string | null;
-  /** last trigger, human-formatted by systemd; null when never */
+  /** last recorded fire, same format; null when never */
   last: string | null;
-  /** outcome of the last triggered run */
+  /** outcome of the last run — 'unknown': a run's exit code lives inside
+   *  tmux, where the scheduler can't see it (the old systemd backend got
+   *  this from the unit's Result) */
   lastResult: 'success' | 'failed' | 'unknown';
 }
 
 export interface JobsState {
-  /** false when systemctl --user is unusable (page degrades to a notice) */
+  /** always true since scheduling moved in-process (kept for wire compat:
+   *  the scheduler runs wherever the server does, container included) */
   available: boolean;
-  /** probe detail for the degraded notice */
+  /** probe detail — always null now */
   detail: string | null;
   jobs: ScheduledJob[];
 }
 
 export interface CalendarCheck {
   valid: boolean;
-  /** human-formatted first elapse on success */
+  /** next fire on success, local "YYYY-MM-DD HH:mm" */
   next: string | null;
   error: string | null;
-  /** 'systemd-analyze' when the real parser accepted it, 'basic' when only
-   *  the built-in sanity check ran (systemd-analyze absent) */
-  validatedBy: 'systemd-analyze' | 'basic';
+  /** 'cron-parser' when the real parser accepted it (it always runs —
+   *  no absent-binary fallback anymore) */
+  validatedBy: 'cron-parser';
 }
 
 // ---- settings dashboard (/settings ← /api/settings; /api/update-pi) ----

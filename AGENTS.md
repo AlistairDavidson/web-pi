@@ -5,6 +5,10 @@ README.md.
 
 ## Testing
 
+`npm run test:unit` — node:test units in `tests/unit/` against the
+compiled `dist-server` — `npm run build` first (tsc-only is enough:
+`tsc -p tsconfig.server.json && npm run test:unit`).
+
 `npm run test:e2e` — Playwright integration tests (chromium; browser must
 exist in ~/.cache/ms-playwright). Fully hermetic: the config boots
 `dist-server/server/main.js` against a `/tmp/web-pi-itest` workspace (own

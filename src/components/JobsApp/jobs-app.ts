@@ -4,7 +4,6 @@ import '@awesome.me/webawesome/dist/components/button/button.js';
 import '@awesome.me/webawesome/dist/components/icon/icon.js';
 import '@awesome.me/webawesome/dist/components/card/card.js';
 import '@awesome.me/webawesome/dist/components/badge/badge.js';
-import '@awesome.me/webawesome/dist/components/callout/callout.js';
 import '@awesome.me/webawesome/dist/components/dialog/dialog.js';
 import '@awesome.me/webawesome/dist/components/input/input.js';
 import '@awesome.me/webawesome/dist/components/textarea/textarea.js';
@@ -65,22 +64,11 @@ export class JobsApp extends HTMLElement {
   }
 
   private render(st: JobsState): void {
-    const degraded = this.querySelector('#jobs-degraded') as HTMLElement;
-    const detail = this.querySelector('#jobs-degraded-detail') as HTMLElement;
     const fresh = this.querySelector('#jobs-new') as HTMLElement;
     const list = this.querySelector('#jobs-list') as HTMLElement;
-    if (!st.available) {
-      degraded.classList.remove('hidden');
-      detail.textContent = st.detail ? ` (${st.detail})` : '';
-      fresh.classList.add('hidden');
-      list.innerHTML = '';
-      return;
-    }
-    degraded.classList.add('hidden');
-    detail.textContent = '';
     fresh.classList.remove('hidden');
     list.innerHTML = st.jobs.length === 0
-      ? `<p class="jobs-empty">no jobs yet — "new job" creates a systemd user timer.</p>`
+      ? `<p class="jobs-empty">no jobs yet — "new job" schedules a recurring command.</p>`
       : st.jobs.map(j => this.card(j)).join('');
     this.querySelectorAll<HTMLElement>('[data-run]').forEach(el => {
       el.onclick = () => this.run(el.dataset.run!);
@@ -99,8 +87,8 @@ export class JobsApp extends HTMLElement {
   private card(j: ScheduledJob): string {
     const badges = [
       j.active
-        ? '<wa-badge pill variant="success">timer active</wa-badge>'
-        : '<wa-badge pill>timer stopped</wa-badge>',
+        ? '<wa-badge pill variant="success">scheduled</wa-badge>'
+        : '<wa-badge pill>invalid schedule</wa-badge>',
       j.running
         ? `<wa-badge pill variant="brand">running</wa-badge>`
         : '',
@@ -150,7 +138,7 @@ export class JobsApp extends HTMLElement {
     const command = this.querySelector('#job-command') as WaFormControl;
     dlg.setAttribute('label', job ? `edit job ${job.name}` : 'new job');
     name.value = job?.name ?? '';
-    name.disabled = job !== null; // the name is the unit identity — no renames
+    name.disabled = job !== null; // the name is the job identity — no renames
     schedule.value = job?.schedule ?? '';
     command.value = job?.command ?? '';
     this.setFeedback(null);
@@ -171,8 +159,7 @@ export class JobsApp extends HTMLElement {
     if (!c) return;
     if (c.valid) {
       el.className = 'schedule-feedback ok';
-      el.textContent = (c.next ? `next: ${c.next}` : 'valid')
-        + (c.validatedBy === 'basic' ? ' (basic check — systemd-analyze absent)' : '');
+      el.textContent = c.next ? `next: ${c.next}` : 'valid';
     } else {
       el.className = 'schedule-feedback err';
       el.textContent = c.error ?? 'invalid schedule';
@@ -213,7 +200,7 @@ export class JobsApp extends HTMLElement {
         return;
       }
       (this.querySelector('#job-dialog') as WaDialog).open = false;
-      this.toast(`job ${body.name ?? name} saved — timer enabled`, 'success', 'circle-check');
+      this.toast(`job ${body.name ?? name} saved`, 'success', 'circle-check');
       await this.load();
     } finally {
       this.inflight = false;
@@ -239,8 +226,8 @@ export class JobsApp extends HTMLElement {
   private confirmDelete(name: string): void {
     this.deleting = name;
     (this.querySelector('#job-delete-text') as HTMLElement).textContent =
-      `Delete job "${name}"? Stops its timer and removes webpi-${name}.service / ` +
-      `.timer. A run that's currently live keeps its tmux session.`;
+      `Delete job "${name}"? Removes its schedule and run history. ` +
+      `A run that's currently live keeps its tmux session.`;
     (this.querySelector('#job-delete-dialog') as WaDialog).open = true;
   }
 

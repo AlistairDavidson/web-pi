@@ -1,11 +1,11 @@
 // db.ts — web-pi's persisted state: one SQLite file (node:sqlite).
 //
 // Everything the app itself writes lives in ENV.WEB_PI_DB_FILE (default
-// <state dir>/webpi.db): the login credential (single row) and a `sessions`
-// overlay table today; scheduled-job bookkeeping lands on it with the
-// in-process scheduler (TODO.md). pi's own store (sessions/, provider
-// creds under WEB_PI_AGENT_DIR) and the systemd job units are not web-pi
-// state and stay untouched.
+// <state dir>/webpi.db): the login credential (single row), a `sessions`
+// overlay table, and the scheduled-jobs tables (`jobs` definitions,
+// `job_runs` bookkeeping — src/lib/jobs.ts). pi's own store (sessions/,
+// provider creds under WEB_PI_AGENT_DIR) is not web-pi state and stays
+// untouched.
 //
 // - node:sqlite's DatabaseSync is synchronous on purpose: every call here
 //   is a point query on a tiny table — cheaper than the whole-file JSON
@@ -41,6 +41,25 @@ const SCHEMA = `
     session_id TEXT    PRIMARY KEY,  -- pi's id
     hidden_at  INTEGER                -- NULL = visible
   );
+  -- Scheduled-job definitions for the in-process scheduler
+  -- (src/lib/jobs.ts). command is an arbitrary shell string BY DESIGN
+  -- (typed by the authenticated user) — it only ever reaches tmux as
+  -- tmux's own command string, never a server-side shell.
+  CREATE TABLE IF NOT EXISTS jobs (
+    name       TEXT    PRIMARY KEY,  -- JOB_NAME_RE (src/lib/jobs.ts)
+    schedule   TEXT    NOT NULL,     -- 5-field cron
+    command    TEXT    NOT NULL,
+    created_at INTEGER NOT NULL      -- epoch ms; catch-up reference until the first fire
+  );
+  -- One row per fired run (scheduler tick, boot catch-up, or "run now").
+  -- MAX(fired_at) per job is its last-fired: what boot catch-up compares
+  -- against the schedule (systemd Persistent=true equivalent).
+  CREATE TABLE IF NOT EXISTS job_runs (
+    job      TEXT    NOT NULL,
+    fired_at INTEGER NOT NULL,       -- epoch ms the run's tmux session opened
+    origin   TEXT    NOT NULL        -- 'schedule' | 'catchup' | 'manual'
+  );
+  CREATE INDEX IF NOT EXISTS job_runs_job ON job_runs (job, fired_at);
 `;
 
 /** web-pi's state database: a lazily-opened node:sqlite connection (see
@@ -62,9 +81,12 @@ export class StateDb {
       // the db open — let sqlite wait out the lock instead of failing.
       db.exec('PRAGMA busy_timeout = 3000');
       db.exec(SCHEMA);
+      // user_version: 1 = credential + sessions; 2 adds the job tables
+      // (additive — the CREATE IF NOT EXISTS block above brings any older
+      // db up to v2 shape; nothing is ever dropped).
       const v = db.prepare('PRAGMA user_version').get() as { user_version: number };
-      if (v.user_version === 0) db.exec('PRAGMA user_version = 1');
-      else if (v.user_version > 1) {
+      if (v.user_version < 2) db.exec('PRAGMA user_version = 2');
+      else if (v.user_version > 2) {
         throw new Error(`state db ${this.file} is schema v${v.user_version} — newer than this build understands`);
       }
       if (fresh) fs.chmodSync(this.file, 0o600); // it holds the password hash
