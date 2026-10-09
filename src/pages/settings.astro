@@ -66,6 +66,24 @@ const base = (import.meta.env.BASE_URL ?? '/').replace(/\/+$/, '');
         </p>
       </div>
     </wa-card>
+
+    <wa-card class="settings-card" with-header>
+      <div slot="header" class="wa-split">
+        <strong class="card-title">session</strong>
+        <span class="hint">sessions last 7 days idle, 30 days from login</span>
+      </div>
+      <div class="wa-split">
+        <div class="wa-stack wa-gap-3xs">
+          <span>log out everywhere</span>
+          <span class="hint">ends every signed-in browser (all tabs, all devices), closes their terminals</span>
+        </div>
+        <wa-button id="logout-all" variant="danger" size="s">
+          <wa-icon slot="start" name="right-from-bracket"></wa-icon>
+          log out everywhere
+        </wa-button>
+      </div>
+      <wa-callout id="logout-result" variant="danger" class="hidden"></wa-callout>
+    </wa-card>
   </main>
 </Base>
 
@@ -105,6 +123,8 @@ const base = (import.meta.env.BASE_URL ?? '/').replace(/\/+$/, '');
   const result = $<WaCalloutLike>('update-result');
   const outputWrap = $<WaDetailsLike>('update-output');
   const output = outputWrap.querySelector('pre')!;
+  const logoutAllBtn = $<WaButtonLike>('logout-all');
+  const logoutResult = $<WaCalloutLike>('logout-result');
 
   let npmAvailable = true;
 
@@ -174,6 +194,31 @@ const base = (import.meta.env.BASE_URL ?? '/').replace(/\/+$/, '');
     } finally {
       updateBtn.loading = false;
       updateBtn.disabled = !npmAvailable;
+    }
+  });
+
+  // 'Log out everywhere': the server drops every session token and ends
+  // every live terminal. This browser is sent back to the sign-in page —
+  // other browsers find out on their next request (or terminal message).
+  logoutAllBtn.addEventListener('click', async () => {
+    if (logoutAllBtn.disabled) return;
+    logoutAllBtn.loading = true;
+    logoutAllBtn.disabled = true;
+    logoutResult.classList.add('hidden');
+    try {
+      const res = await fetch(`${BASE}/api/logout-all`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      // 401 = the session already expired elsewhere — back to sign-in too.
+      if (res.ok || res.status === 401) { location.href = `${BASE}/login`; return; }
+      logoutResult.textContent = `log out everywhere failed (HTTP ${res.status})`;
+      logoutResult.classList.remove('hidden');
+    } catch (e) {
+      logoutResult.textContent = `request failed: ${(e as Error).message}`;
+      logoutResult.classList.remove('hidden');
+    } finally {
+      logoutAllBtn.loading = false;
+      logoutAllBtn.disabled = false;
     }
   });
 

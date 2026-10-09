@@ -130,4 +130,10 @@ export type ServerMsg =
   | { type: 'attached'; target: string; socket: string }
   | { type: 'output'; data: string }
   | { type: 'exit'; target: string }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  /** the session token this socket authenticated with was dropped
+   *  (logout / log out everywhere) — the terminal must not reconnect */
+  | { type: 'signed-out' }
+  /** the server is shutting down (SIGTERM/SIGINT) — reconnectable:
+   *  unlike 'exit'/'error' the client reattaches with its usual backoff */
+  | { type: 'restart' };

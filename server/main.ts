@@ -147,8 +147,9 @@ function send(res: http.ServerResponse, code: number, body: string,
   res.writeHead(code, { 'Cache-Control': 'no-store', ...headers });
   res.end(body);
 }
-function sendJSON(res: http.ServerResponse, code: number, obj: unknown): void {
-  send(res, code, JSON.stringify(obj), { 'Content-Type': 'application/json' });
+function sendJSON(res: http.ServerResponse, code: number, obj: unknown,
+  headers?: Record<string, string>): void {
+  send(res, code, JSON.stringify(obj), { 'Content-Type': 'application/json', ...headers });
 }
 function sendClientFile(res: http.ServerResponse, rel: string, cache: boolean): void {
   // rel is from a fixed route table or validated against traversal below.
@@ -259,6 +260,9 @@ function underBase(url: string): boolean {
 function authed(req: http.IncomingMessage): boolean {
   return auth.valid(Auth.parseCookies(req.headers.cookie).webpi_session);
 }
+/** Header that clears the browser's session cookie (logout, log out everywhere). */
+const clearSessionCookie = (): string =>
+  `webpi_session=; HttpOnly; Secure; SameSite=Strict; Path=${CFG.base}; Max-Age=0`;
 
 // ---------- Astro SSR (middleware) ----------
 // The Astro build emits an ESM handler (dist/server/entry.mjs); loaded once
@@ -371,10 +375,12 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
   }
 
   if (req.method === 'POST' && url === route('/logout')) {
-    auth.drop(Auth.parseCookies(req.headers.cookie).webpi_session);
-    send(res, 200, 'ok', {
-      'Set-Cookie': `webpi_session=; HttpOnly; Secure; SameSite=Strict; Path=${CFG.base}; Max-Age=0`,
-    });
+    const token = Auth.parseCookies(req.headers.cookie).webpi_session;
+    auth.drop(token);
+    // Logout must end the terminals this token authenticated, not just
+    // future requests: they get 'signed-out' and don't reconnect.
+    if (token) closeTokenSockets(token, { type: 'signed-out' });
+    send(res, 200, 'ok', { 'Set-Cookie': clearSessionCookie() });
     return;
   }
 
@@ -415,9 +421,24 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
     return;
   }
 
+  // 'Log out everywhere' (/settings): every token dies and every
+  // terminal ends — suspected-cookie-theft recovery in one click. This
+  // browser's cookie is cleared too.
+  if (req.method === 'POST' && url === route('/api/logout-all')) {
+    auth.dropAll();
+    closeAllSockets({ type: 'signed-out' });
+    send(res, 200, 'ok', { 'Set-Cookie': clearSessionCookie() });
+    return;
+  }
+
   if (req.method === 'GET' && url === route('/api/state')) {
-    // Async scan + title cache: the poll must never hold the event loop —
-    // terminal WS traffic keeps flowing while it runs.
+    // Two things share this one response: the poll every open tab makes
+    // every 15 s re-arms the browser cookie's Max-Age when it has drifted
+    // near half the sliding window (auth.cookieRefresh decides — see the
+    // justification there), and the scan itself is async + title-cached
+    // so the poll never holds the event loop — terminal WS traffic keeps
+    // flowing while it runs.
+    const refresh = auth.cookieRefresh(Auth.parseCookies(req.headers.cookie).webpi_session, CFG.base);
     listSessions(CFG.sessionsDir).then(sessList => {
       tmux.listSessions((err, live) => {
         const state: ConsoleState = {
@@ -426,7 +447,7 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
           sessions: sessList.map(s => ({ ...s, hidden: hiddenSessions.has(s.id) })),
           hiddenCount: hiddenSessions.size,
         };
-        sendJSON(res, 200, state);
+        sendJSON(res, 200, state, refresh === null ? undefined : { 'Set-Cookie': refresh });
       });
     }, () => send(res, 500, 'internal error')); // unreachable: the scan tolerates junk
     return;
@@ -581,9 +602,55 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
 // ---------- WebSocket → node-pty → tmux attach ----------
 const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
 
+// Live sockets per session token, fed by the upgrade handler (which has
+// already validated it): POST /logout, log-out-everywhere and shutdown
+// must end the terminals a token authenticated — not merely stop future
+// requests — and shutdown must be able to reach every client.
+const socketsByToken = new Map<string, Set<WebSocket>>();
+
+function trackSocket(token: string, ws: WebSocket): void {
+  let set = socketsByToken.get(token);
+  if (!set) { set = new Set(); socketsByToken.set(token, set); }
+  set.add(ws);
+}
+function untrackSocket(token: string, ws: WebSocket): void {
+  const set = socketsByToken.get(token);
+  if (!set) return;
+  set.delete(ws);
+  if (set.size === 0) socketsByToken.delete(token);
+}
+
+/** Close with a hard fallback: a peer that never answers the close frame
+ *  (dead client, or a script holding a stolen token) is terminated — a
+ *  logout/shutdown can't leave a live terminal behind on a limp socket. */
+function closeSoon(ws: WebSocket): void {
+  try { ws.close(); } catch { /* already closed */ }
+  setTimeout(() => { try { ws.terminate(); } catch { /* gone */ } }, 1500).unref();
+}
+
+/** Send `final`, then end every socket authenticated with `token`. */
+function closeTokenSockets(token: string, final: ServerMsg): void {
+  const set = socketsByToken.get(token);
+  if (!set) return;
+  socketsByToken.delete(token);
+  for (const ws of set) { wsSend(ws, final); closeSoon(ws); }
+}
+
+/** Send `final`, then end every socket, whichever token it used. */
+function closeAllSockets(final: ServerMsg): void {
+  for (const set of socketsByToken.values()) {
+    for (const ws of set) { wsSend(ws, final); closeSoon(ws); }
+  }
+  socketsByToken.clear();
+}
+
+// Graceful shutdown state (sequence at the bottom, by server.listen).
+let shuttingDown = false;
+
 server.on('upgrade', (req, socket, head) => {
   const url = (req.url ?? '').split('?')[0]!;
   if (url !== route('/ws')) { socket.destroy(); return; }
+  if (shuttingDown) { socket.destroy(); return; } // stopping: no new terminals
   if (!wsLimiter.allow(ipOf(req))) { socket.destroy(); return; }
   // The terminal is browser-only: an upgrade must carry a matching Origin
   // (no curl/websocat clients, no cross-site WebSocket hijacking from a
@@ -591,12 +658,13 @@ server.on('upgrade', (req, socket, head) => {
   // a missing header is destroyed, not waved through.
   const origin = req.headers.origin;
   if (!origin || !originOk(req)) { socket.destroy(); return; }
-  if (!auth.valid(Auth.parseCookies(req.headers.cookie).webpi_session)) {
+  const token = Auth.parseCookies(req.headers.cookie).webpi_session;
+  if (!auth.valid(token)) {
     socket.write(`HTTP/1.1 401 Unauthorized\r\n${securityHeaderBlock()}\r\n`);
     socket.destroy();
     return;
   }
-  wss.handleUpgrade(req, socket, head, ws => attach(ws));
+  wss.handleUpgrade(req, socket, head, ws => attach(ws, token!));
 });
 
 interface Pty { write(d: string): void; resize(c: number, r: number): void; kill(): void;
@@ -635,7 +703,8 @@ function parseClientMsg(raw: string): ClientMsg | null {
 // tick means the peer is gone — terminate, and the pty is reaped.
 const PING_INTERVAL_MS = 30_000;
 
-function attach(ws: WebSocket): void {
+function attach(ws: WebSocket, token: string): void {
+  trackSocket(token, ws);
   let p: Pty | null = null;
   // The client sends {attach} and {resize} back-to-back on open, but the
   // pty only exists after an async tmux lookup — remember the requested
@@ -708,11 +777,20 @@ function attach(ws: WebSocket): void {
   ws.on('pong', () => { alive = true; });
   const keepalive = setInterval(() => {
     if (!alive) { ws.terminate(); return; }
+    // Liveness sweep: the expiry clocks must bind established terminals
+    // too. A socket whose token died — idle, the 30-day absolute cap, or
+    // a logout-everywhere — gets the signed-out message and closes on
+    // the next tick instead of riding the keepalive forever (a terminal
+    // is a live shell; the token dying for HTTP must end it too).
+    // Non-renewing on purpose (auth.alive): WS traffic never slides a
+    // token — only authed HTTP does, via auth.valid.
+    if (!auth.alive(token)) { closeTokenSockets(token, { type: 'signed-out' }); return; }
     alive = false;
     try { ws.ping(); } catch { /* closing */ }
   }, PING_INTERVAL_MS);
 
   ws.on('close', () => {
+    untrackSocket(token, ws);
     clearInterval(keepalive);
     if (p) { try { p.kill(); } catch { /* already gone */ } }
   });
@@ -728,3 +806,54 @@ server.listen(CFG.port, CFG.host, () => {
       console.log(err ? `pi: version check failed (${(err as Error).message})` : `pi ${String(out).trim()}`));
   }
 });
+
+// ---------- graceful shutdown (SIGTERM / SIGINT) ----------
+// Docker stop, compose, systemd — the container's init relays the signal
+// and the stop must not hang (SIGKILL waits behind stopTimeout, and every
+// attached terminal goes with it). The sequence: stop accepting new
+// connections, tell every open WS 'restart' and close it, then exit once
+// the sockets have drained. shutdownSteps is a small ordered list of
+// closures — other subsystems register into it by pushing (the in-process
+// scheduler stops its tick loop there, so no job fires mid-drain);
+// deliberately not a framework, just "later in the array runs later".
+const SHUTDOWN_DEADLINE_MS = 5000;
+const whenClosed = new Promise<void>(resolve => server.once('close', resolve));
+const shutdownSteps: Array<() => void | Promise<void>> = [
+  () => { shutdownScheduler(); },                    // 0. stop firing scheduled jobs
+  () => { server.close(); },                        // 1. stop listening
+  () => { closeAllSockets({ type: 'restart' }); },  // 2. notify + close every client
+  () => {
+    // Re-armed on an interval, not one-shot: a terminal's close makes the
+    // console page re-poll /api/state on its keep-alive socket — busy
+    // (not idle) at the moment of a one-shot call, then idle with nothing
+    // left to close it, so the one-shot form usually lands on the
+    // deadline with a misleading "drain unfinished". The sweep closes each
+    // straggler the moment it goes idle, so the drain usually completes
+    // clean; the deadline stays as the backstop.
+    const sweep = setInterval(() => server.closeIdleConnections(), 250);
+    return whenClosed.finally(() => clearInterval(sweep));
+  },
+];
+
+function shutdown(signal: string): void {
+  if (shuttingDown) process.exit(0); // a second signal skips the drain
+  shuttingDown = true;
+  console.log(`${signal} received — shutting down`);
+  // A stuck socket must not hold the stop past the deadline.
+  const deadline = setTimeout(() => {
+    console.error(`shutdown: drain unfinished after ${SHUTDOWN_DEADLINE_MS}ms — exiting`);
+    process.exit(0);
+  }, SHUTDOWN_DEADLINE_MS);
+  (async () => {
+    for (const step of shutdownSteps) {
+      try { await step(); } catch (err) { console.error('shutdown step failed:', err); }
+    }
+    clearTimeout(deadline);
+    process.exit(0);
+  })();
+}
+// on(), not once(): a repeated SAME signal would have consumed its once
+// listener and taken the default exit (143) mid-drain — with on(), the
+// shuttingDown flag makes every later signal the fast exit path.
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));

@@ -5,6 +5,11 @@ const PORT = 3470;
 
 export default defineConfig({
   testDir: './tests',
+  // Only the Playwright specs (e2e / state-dir / sessions-cache …): the
+  // node:test units under tests/unit/ are `npm run test:unit` territory,
+  // and Playwright's default pattern (*.@(spec|test).(c|m)…js) would import
+  // them as specs and run their tests inline mid-suite.
+  testMatch: '**/*.spec.ts',
   timeout: 30_000,
   // Serial: tests share one login rate-limit budget (per-IP, in-memory)
   // and one tmux test socket.

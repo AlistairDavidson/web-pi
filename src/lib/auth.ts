@@ -1,19 +1,46 @@
 // auth.ts — single-user login: username + password,
 // salted scrypt hash in the state db (src/lib/db.ts), in-memory session
-// cookies. No account machinery. Fails closed until a credential row
-// exists (set it with `npm run set-password`).
+// tokens. Expiry is two clocks: a sliding idle window renewed on every
+// authed request, plus an absolute cap from login — so a token dies after
+// 7 days unused OR 30 days after it was issued, whichever comes first,
+// even under constant use. No account machinery. Fails closed until a
+// credential row exists (set it with `npm run set-password`).
 import * as crypto from 'node:crypto';
 import type { StateDb } from './db';
 
 const SCRYPT = { N: 16384, r: 8, p: 1, keylen: 64 };
-const SESSION_TTL_MS = 7 * 24 * 3600 * 1000;
+const SESSION_TTL_MS = 7 * 24 * 3600 * 1000;        // sliding: idle expiry
+const SESSION_ABSOLUTE_MS = 30 * 24 * 3600 * 1000;  // hard cap from login
 
 interface Cred { username: string; salt: string; hash: string }
 
-export class Auth {
-  private sessions = new Map<string, number>(); // token -> expiry ms
+/** Session lifetimes, injectable for the unit tests (tests/unit).
+ *  Production always uses the constants above — no env knobs. */
+export interface SessionTtls {
+  /** sliding window: renewed on every authed request */
+  idleMs?: number;
+  /** absolute cap from login — bounds a stolen token under constant use */
+  absoluteMs?: number;
+}
 
-  constructor(private state: StateDb) {}
+interface SessionRec {
+  /** sliding expiry (ms epoch) */
+  exp: number;
+  /** login time — the absolute clock's origin */
+  created: number;
+  /** when a Set-Cookie last (re)armed the browser's Max-Age */
+  cookieAt: number;
+}
+
+export class Auth {
+  private sessions = new Map<string, SessionRec>(); // token -> clocks
+  private readonly idleMs: number;
+  private readonly absoluteMs: number;
+
+  constructor(private state: StateDb, ttls: SessionTtls = {}) {
+    this.idleMs = ttls.idleMs ?? SESSION_TTL_MS;
+    this.absoluteMs = ttls.absoluteMs ?? SESSION_ABSOLUTE_MS;
+  }
 
   configured(): boolean { return this.readCred() !== null; }
 
@@ -53,26 +80,74 @@ export class Auth {
   newSession(): string {
     const token = crypto.randomBytes(32).toString('hex');
     const now = Date.now();
-    this.sessions.set(token, now + SESSION_TTL_MS);
-    for (const [t, exp] of this.sessions) if (exp < now) this.sessions.delete(t);
+    this.sessions.set(token, { exp: now + this.idleMs, created: now, cookieAt: now });
+    for (const [t, s] of this.sessions) if (this.dead(s, now)) this.sessions.delete(t);
     return token;
   }
 
-  /** Validate a token; sliding renewal on use. */
+  /** Expired on either clock — idle, or past the absolute cap from login. */
+  private dead(s: SessionRec, now: number): boolean {
+    return s.exp < now || s.created + this.absoluteMs <= now;
+  }
+
+  /** Validate a token; sliding renewal on use, bounded by the absolute cap. */
   valid(token: string | undefined): boolean {
     if (!token) return false;
-    const exp = this.sessions.get(token);
-    if (exp === undefined) return false;
-    if (exp < Date.now()) { this.sessions.delete(token); return false; }
-    this.sessions.set(token, Date.now() + SESSION_TTL_MS);
+    const s = this.sessions.get(token);
+    if (!s) return false;
+    const now = Date.now();
+    if (this.dead(s, now)) { this.sessions.delete(token); return false; }
+    s.exp = now + this.idleMs;
     return true;
   }
 
   drop(token: string | undefined): void { if (token) this.sessions.delete(token); }
 
+  /** Validity peek WITHOUT renewal — for liveness sweeps on established
+   *  WS terminals. WS traffic must never slide a token (only authed HTTP
+   *  does, via valid()), so this never extends life; it only reports it.
+   *  A terminal whose token died on either clock — idle, the absolute
+   *  cap, or a logout — is closed by the server's sweep instead of
+   *  riding the WS keepalive forever. Pure peek: no Map mutation (the
+   *  next authed HTTP touch or newSession purge does the deleting). */
+  alive(token: string | undefined): boolean {
+    if (!token) return false;
+    const s = this.sessions.get(token);
+    return !!s && !this.dead(s, Date.now());
+  }
+
+  /** 'Log out everywhere': every token dies (their sockets are closed by
+   *  the server route, which owns the connection tracking). */
+  dropAll(): void { this.sessions.clear(); }
+
+  /** Set-Cookie re-arming the browser cookie's Max-Age, or null when not
+   *  due. The server renews a token on every request but the browser's
+   *  cookie is otherwise fixed at login, so the two clocks drift apart:
+   *  actively used, the browser would forget the cookie after `idleMs`
+   *  while the token lives on. Refreshing on every authed response would
+   *  put a Set-Cookie on nearly everything; instead the /api/state poll
+   *  (every open tab, 15 s) calls this and we only re-arm once half the
+   *  idle window passed since the last Set-Cookie — at most one extra
+   *  header per few days per token, and the cookie can never lag the
+   *  server's sliding window by more than that half.
+   *
+   *  Precondition: only called from /api/state, which sits behind
+   *  auth.valid()'s renewal — the token was just touched. A dead or
+   *  unknown token answers null (no header) rather than a stale one. */
+  cookieRefresh(token: string | undefined, path = '/'): string | null {
+    if (!token) return null;
+    const s = this.sessions.get(token);
+    if (!s) return null;
+    const now = Date.now();
+    if (this.dead(s, now)) return null;
+    if (now - s.cookieAt < this.idleMs / 2) return null;
+    s.cookieAt = now;
+    return this.cookieHeader(token, path);
+  }
+
   cookieHeader(token: string, path = '/'): string {
     return `webpi_session=${token}; HttpOnly; Secure; SameSite=Strict; ` +
-      `Path=${path}; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`;
+      `Path=${path}; Max-Age=${Math.floor(this.idleMs / 1000)}`;
   }
 
   static parseCookies(header: string | undefined): Record<string, string> {

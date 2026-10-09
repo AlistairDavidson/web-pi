@@ -12,8 +12,8 @@
     "build": "astro build && tsc -p tsconfig.server.json",
     "start": "node dist-server/server/main.js",
     "set-password": "node dist-server/server/set-password.js",
-    "test:unit": "node --test tests/unit/jobs.test.mjs",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:unit": "tsc -p tsconfig.server.json && node --test tests/unit/*.test.mjs"
   },
   "dependencies": {
     "@astrojs/node": "^11.1.6",

@@ -5,10 +5,18 @@
 // Runs serially (workers: 1) — see playwright.config.ts.
 import { execFileSync, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+// Namespace import on purpose: a named `WebSocket` import would shadow the
+// global for the WHOLE module after esbuild's CJS transform — every
+// `WebSocket` inside in-page evaluate closures would be rewritten to the
+// node binding (…ReferenceError: _ws2 is not defined… in the browser).
+import * as nodeWs from 'ws';
 import { expect, test, type Cookie, type Page } from '@playwright/test';
 import { WebSocket as NodeWebSocket } from 'ws';
+import { setCredential } from '../src/lib/auth';
+import { StateDb } from '../src/lib/db';
 import { MARKER, PASSWORD, TMUX_SOCKET, USERNAME, UUIDV7_SIBLINGS, WORKSPACE } from './env';
 
 const FIXTURE_A = '11111111-1111-1111-1111-111111111111';
@@ -961,6 +969,178 @@ test('console/jobs/settings load requests nothing off-origin and glyphs render f
     expect(await glyphsRender(), `${p} glyphs`).toBe(true);
   }
   expect(external).toEqual([]);
+});
+
+test('logout ends live terminal sockets: signed-out message, no reconnect', async ({ page }) => {
+  await login(page);
+  await page.fill('wa-input#new-name input', 'itest-signout');
+  await page.click('wa-button#new-btn');
+  await waitForTermText(page, MARKER, 20_000);
+  await expect(page.locator('.terminal-status.ok')).toContainText('attached: itest-signout');
+
+  // Keep the page on the console while its session dies: the sidebar poll
+  // (and the terminal-closed re-poll) would otherwise 401 → /login.
+  await page.route('**/api/state', route => route.fulfill({
+    json: { me: 'ok', configured: true, live: [], sessions: [], hiddenCount: 0 },
+  }));
+
+  // Protocol: a second socket on the same cookie sees 'signed-out' and
+  // then the close — in that order.
+  const events = page.evaluate(async () => {
+    const ws = new WebSocket(`ws://${location.host}/ws`);
+    await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });
+    const seen = new Promise<string[]>(resolve => {
+      const log: string[] = [];
+      ws.onmessage = ev => log.push('msg:' + (JSON.parse(ev.data as string) as { type: string }).type);
+      ws.onclose = () => { log.push('close'); resolve(log); };
+    });
+    await fetch('/logout', { method: 'POST' });
+    return await Promise.race([
+      seen,
+      new Promise<string[]>(resolve => setTimeout(() => resolve(['timeout']), 5000)),
+    ]);
+  });
+  expect(await events).toEqual(['msg:signed-out', 'close']);
+
+  // The terminal renders it and does not retry: status stays 'signed out'
+  // past the first reconnect backoff (which would show 'reconnecting').
+  await expect(page.locator('.terminal-status.info')).toContainText('signed out');
+  await waitForTermText(page, 'signed out');
+  await expect.poll(() => page.evaluate(() =>
+    (document.querySelector('agent-terminal') as unknown as { websocket?: WebSocket }).websocket
+    === undefined)).toBe(true);
+  await page.waitForTimeout(2600);
+  await expect(page.locator('.terminal-status.info')).toContainText('signed out');
+
+  // The killed cookie is the suite's shared one — drop the cache so the
+  // next login() signs in fresh instead of replaying a dead token.
+  sessionCookie = null;
+});
+
+test('log out everywhere ends every signed-in session', async ({ page, browser }) => {
+  await login(page); // fresh sign-in (the previous test killed the cookie)
+
+  // A second, independent login in its own context: another live token.
+  const ctx2 = await browser.newContext();
+  const page2 = await ctx2.newPage();
+  await page2.goto('/login');
+  await signIn(page2);
+  await page2.waitForURL(u => u.pathname === '/');
+
+  // /settings owns the button; clicking it clears every token.
+  await page.goto('/settings');
+  await page.click('wa-button#logout-all');
+  await page.waitForURL(u => u.pathname === '/login');
+
+  // Both tokens are rejected — the token this browser used and the second
+  // context's independent one (in-page fetch: the cookie is Secure).
+  const state = (p: Page): Promise<number> =>
+    p.evaluate(async () => (await fetch('/api/state')).status);
+  expect(await state(page)).toBe(401);
+  expect(await state(page2)).toBe(401);
+  await ctx2.close();
+
+  sessionCookie = null; // both tokens are dead
+});
+
+test('SIGTERM: every socket gets restart, closes, and the process exits 0', async ({ browser }) => {
+  test.setTimeout(60_000); // boots its own server + browser session before the signal
+  // The suite's webServer is managed by Playwright — spawn our own
+  // short-lived server instead (suite env pattern from playwright.config,
+  // own port + tmp dir so nothing collides with the shared instance).
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webpi-sigterm-'));
+  const dbFile = path.join(dir, 'webpi.db');
+  setCredential(new StateDb(dbFile), USERNAME, PASSWORD);
+  const port = 3481;
+  // Per-run socket: a server left over from an interrupted run would hold
+  // the sig-live session name and /api/new would 409.
+  const tmuxSocket = `webpi-itest-sig-${process.pid}`;
+  const child = spawn(process.execPath, ['dist-server/server/main.js'], {
+    env: {
+      ...process.env,
+      WEB_PI_PORT: String(port),
+      WEB_PI_HOST: '127.0.0.1',
+      WEB_PI_DB_FILE: dbFile,
+      WEB_PI_SESSIONS_DIR: path.join(dir, 'sessions'),
+      WEB_PI_AGENT_DIR: path.join(dir, 'pi-agent'),
+      WEB_PI_NEW_SESSION_CWD: dir,
+      WEB_PI_TMUX_SOCKET: tmuxSocket,
+      WEB_PI_COMMAND: '/bin/sh',
+    },
+    stdio: 'ignore',
+  });
+  let ws: nodeWs.WebSocket | null = null;
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  try {
+    // Boot: /login answers (any status) once the server is up.
+    const up = Date.now() + 15_000;
+    for (;;) {
+      try {
+        const r = await fetch(`http://127.0.0.1:${port}/login`);
+        if (r.status === 200) break;
+      } catch { /* not listening yet */ }
+      if (Date.now() > up) throw new Error('spawned server did not come up');
+      await new Promise(r => setTimeout(r, 100));
+    }
+
+    // Login on the spawned server (its own limiter — the shared budget
+    // is untouched) and open one authenticated socket.
+    const login = await fetch(`http://127.0.0.1:${port}/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: USERNAME, password: PASSWORD }),
+    });
+    expect(login.status).toBe(200);
+    const cookie = (login.headers.get('set-cookie') ?? '').split(';')[0]!;
+    // Origin is mandatory on WS upgrades (browser hardening): a raw Node
+    // client must claim the same origin the server derives from Host.
+    ws = new nodeWs.WebSocket(`ws://127.0.0.1:${port}/ws`, {
+      headers: { Cookie: cookie, Origin: `http://127.0.0.1:${port}` },
+    });
+    const messages: string[] = [];
+    ws.on('message', d => messages.push(String(d)));
+    await new Promise<void>((resolve, reject) => {
+      ws!.on('open', resolve);
+      ws!.on('error', reject);
+    });
+
+    // And one real console page attached to a session: the client must
+    // treat 'restart' as reconnectable (unlike 'exit'/'error') — it says
+    // so and starts its backoff instead of going dark.
+    await page.goto(`http://127.0.0.1:${port}/login`);
+    await signIn(page);
+    await page.waitForURL(u => u.pathname === '/');
+    await page.fill('wa-input#new-name input', 'sig-live');
+    await page.click('wa-button#new-btn');
+    await expect(page.locator('.terminal-status.ok')).toContainText('attached: sig-live', { timeout: 20_000 });
+
+    // Listeners armed BEFORE the signal: if the drain ever completes fast
+    // (no keep-alive straggler), 'exit'/'close' can fire before a
+    // post-kill registration would attach, and the await would hang to
+    // the test timeout.
+    const exited = new Promise<number | null>(resolve => child.on('exit', code => resolve(code)));
+    const closed = new Promise<void>(resolve => ws!.on('close', resolve));
+    child.kill('SIGTERM');
+    const killed = Date.now();
+    await closed;
+    // The restart notice arrived before the close, and was the last thing.
+    expect(messages).toContain(JSON.stringify({ type: 'restart' }));
+    expect(messages[messages.length - 1]).toBe(JSON.stringify({ type: 'restart' }));
+    // The browser terminal announces the restart and reconnects (the
+    // server is gone, so the backoff keeps retrying — that's the point).
+    await expect(page.locator('.terminal-status')).toContainText('server restarting', { timeout: 5000 });
+    await expect(page.locator('.terminal-status')).toContainText('reconnecting in', { timeout: 5000 });
+
+    expect(await exited).toBe(0);
+    expect(Date.now() - killed).toBeLessThan(7000); // ~5s drain deadline + slack
+  } finally {
+    if (child.exitCode === null) child.kill('SIGKILL');
+    try { ws?.close(); } catch { /* already gone */ }
+    await ctx.close();
+    try { execFileSync('tmux', ['-L', tmuxSocket, 'kill-server'], { stdio: 'ignore' }); }
+    catch { /* no server was started — fine */ }
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('login rate limit kicks in (10 per 15 min per IP) and ignores a spoofed X-Forwarded-For', async ({ request }) => {

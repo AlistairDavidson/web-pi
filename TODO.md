@@ -1,11 +1,5 @@
 apps folder that contains git submodules
 
-session lifecycle + graceful shutdown (DESIGN_REVIEW 1.3/1.4):
-- track WebSockets per token (Map<token, Set<ws>> fed by the upgrade handler); POST /logout closes them — terminal gets a final "signed out" message, then the socket closes
-- expiry model: sliding 7 d idle (as now) + 30 d absolute cap from login (Map<token, {exp, created}>) + cookie Max-Age refreshed on authed responses so browser and server agree; stolen token dies within 30 d even under constant use
-- "log out everywhere" button on /settings: clears every token, closes every socket (recovery after suspected cookie theft)
-- SIGTERM/SIGINT handler: stop accepting connections, send a new 'restart' WS message then close each socket, exit after drain with a short deadline (clients show "server restarting — reconnecting" and the existing backoff reattach lands back on the session)
-
 deployment docs (DESIGN_REVIEW 2/3.1): document VPS/Docker as the recommended shape and single-EC2-with-Docker for AWS; say nothing about ECS (single-host-only note where deploy is discussed). No ECS-specific code — the SIGTERM handler and state dir arrive via the other TODOs anyway
 
 update pi button, auto-update setting
