@@ -28,7 +28,10 @@ RUN apt-get update \
       tmux git ripgrep ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir /app && chown node:node /app
+# /state is where compose points WEB_PI_STATE_DIR (webpi.db, pi-agent/) —
+# created node-owned here so a fresh named volume mounted on it inherits
+# that ownership instead of the root:root an empty volume starts with.
+RUN mkdir /app /state && chown node:node /app /state
 
 # --chown sets ownership inside the COPY layer; a separate `chown -R`
 # after the fact copy-ups every file again (~470MB dead layer). The

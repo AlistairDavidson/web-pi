@@ -33,9 +33,14 @@ export const PI_AGENT_DIR: string | undefined = process.env.PI_CODING_AGENT_DIR;
 export const PI_SESSION_DIR: string | undefined = process.env.PI_CODING_AGENT_SESSION_DIR;
 
 const home = RAW_ENV.WEB_PI_HOME ?? os.homedir();
-const agentDir = RAW_ENV.WEB_PI_AGENT_DIR ?? path.join(APP_ROOT, '.pi-agent');
+// All web-pi state under one directory (DESIGN_REVIEW §3.3): XDG-style
+// under HOME, so nothing defaults into the app root where a container
+// image sync could overwrite it. WEB_PI_STATE_DIR moves the whole layout;
+// the per-path WEB_PI_AGENT_DIR / WEB_PI_DB_FILE overrides still win.
+const stateDir = RAW_ENV.WEB_PI_STATE_DIR ?? path.join(home, '.local', 'state', 'web-pi');
+const agentDir = RAW_ENV.WEB_PI_AGENT_DIR ?? path.join(stateDir, 'pi-agent');
 // web-pi's own persisted state (sqlite: credential + hidden sessions).
-const dbFile = RAW_ENV.WEB_PI_DB_FILE ?? path.join(APP_ROOT, 'webpi.db');
+const dbFile = RAW_ENV.WEB_PI_DB_FILE ?? path.join(stateDir, 'webpi.db');
 
 export const ENV = {
   WEB_PI_HOST: RAW_ENV.WEB_PI_HOST,
@@ -44,6 +49,7 @@ export const ENV = {
   WEB_PI_TMUX_SOCKET: RAW_ENV.WEB_PI_TMUX_SOCKET,
   WEB_PI_TRUST_PROXY: RAW_ENV.WEB_PI_TRUST_PROXY,
   WEB_PI_HOME: home,
+  WEB_PI_STATE_DIR: stateDir,
   WEB_PI_AGENT_DIR: agentDir,
   WEB_PI_DB_FILE: dbFile,
   WEB_PI_CLIENT_DIR: RAW_ENV.WEB_PI_CLIENT_DIR ?? path.join(APP_ROOT, 'dist', 'client'),

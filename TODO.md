@@ -12,13 +12,7 @@ session lifecycle + graceful shutdown (DESIGN_REVIEW 1.3/1.4):
 - "log out everywhere" button on /settings: clears every token, closes every socket (recovery after suspected cookie theft)
 - SIGTERM/SIGINT handler: stop accepting connections, send a new 'restart' WS message then close each socket, exit after drain with a short deadline (clients show "server restarting — reconnecting" and the existing backoff reattach lands back on the session)
 
-state directory (DESIGN_REVIEW 3.3) — the landing spot for the sqlite TODO:
-- WEB_PI_STATE_DIR, defaulting to $WEB_PI_HOME/.local/state/web-pi (XDG-style) on a host install; all state defaults key off it: state/webpi.db, state/pi-agent/ (seeded from the repo pi/ template as now — credentials + sessions live there)
-- container: WEB_PI_STATE_DIR=/state with a dedicated webpi-state volume — outside the entrypoint-synced /app entirely, so the "anything not in the image is state" footgun is structurally gone, not defended against
-- no migration system: deploy is a fresh setup (re-run set-password); a one-shot mv of .pi-agent / webpi.db is all an existing install needs
-- the sqlite db (landed: webpi.db — login credential + hidden-session ids, node:sqlite, no WAL) moves here as state/webpi.db; note WAL needs care if state ever sits on network storage
-
-sqlite landed (webpi.db: auth + hidden-sessions, node:sqlite, no WAL) — remaining: move the db + remaining state files/config into WEB_PI_STATE_DIR above (state/webpi.db), and absorb job bookkeeping when the in-process scheduler lands
+sqlite landed (webpi.db: auth + hidden-sessions, node:sqlite, no WAL; under WEB_PI_STATE_DIR) — remaining: absorb job bookkeeping when the in-process scheduler lands
 
 in-process job scheduler (DESIGN_REVIEW 3.1) — replaces systemd user units:
 - drop systemd jobs.ts (unit files, systemctl, systemd-analyze); scheduler runs inside the server, keeping the run-inside-tmux behaviour (runs open on the shared socket — works in container, host, and the future two-container split)
