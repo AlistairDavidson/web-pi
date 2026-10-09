@@ -269,11 +269,53 @@ function renderAstro(req: http.IncomingMessage, res: http.ServerResponse): void 
     .catch(err => { console.error('astro handler error', err); send(res, 500, 'render failed'); });
 }
 
+// ---------- security headers (DESIGN_REVIEW §1.2) ----------
+// Sent by the app itself on every response — host installs (no nginx) and
+// container installs get the same posture. Astro pages bundle their
+// scripts as external modules (script-src 'self', no 'unsafe-inline');
+// xterm and Lit inject <style> at runtime, hence style 'unsafe-inline';
+// the terminal WS is same-origin (ws/wss of the page's origin — 'self'
+// covers both in current browsers, wss: is listed for older Safari).
+const SECURITY_HEADERS: Record<string, string> = {
+  'Content-Security-Policy':
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+    "connect-src 'self' wss:; frame-ancestors 'none'",
+  'X-Frame-Options': 'DENY',
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'same-origin',
+};
+
+/** Same headers as a raw HTTP/1.1 response block (upgrade rejections are
+ *  written straight to the socket — there is no ServerResponse). */
+function securityHeaderBlock(): string {
+  return Object.entries(SECURITY_HEADERS).map(([n, v]) => `${n}: ${v}\r\n`).join('');
+}
+
+/** Arm `res` so the security headers ride on every response the process
+ *  sends, whichever path writes it: send()/sendJSON()/sendClientFile(),
+ *  the 302, and the Astro SSR handler (which calls writeHead/setHeader on
+ *  the same object). Injection happens at writeHead *and* end — whichever
+ *  fires first — and is idempotent, so a handler that already set one of
+ *  these (or passes its own in writeHead's headers object, which wins per
+ *  Node's merge rules) keeps control of it. */
+function hardenResponse(res: http.ServerResponse): void {
+  const apply = (): void => {
+    for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
+      if (!res.hasHeader(name)) res.setHeader(name, value);
+    }
+  };
+  const writeHead = res.writeHead.bind(res) as (...args: unknown[]) => http.ServerResponse;
+  const end = res.end.bind(res) as (...args: unknown[]) => http.ServerResponse;
+  res.writeHead = ((...args: unknown[]) => { apply(); return writeHead(...args); }) as typeof res.writeHead;
+  res.end = ((...args: unknown[]) => { apply(); return end(...args); }) as typeof res.end;
+}
+
 // ---------- HTTP ----------
 // Last-resort guard: a synchronous throw in a route must cost one 500, not
 // the process (and, in the container, every tmux session with it). Inputs
 // are validated in the routes; this only catches what slips through.
 const server = http.createServer((req, res) => {
+  hardenResponse(res);
   try { handle(req, res); }
   catch (err) {
     console.error('request handler error', err);
@@ -538,7 +580,9 @@ server.on('upgrade', (req, socket, head) => {
   const origin = req.headers.origin;
   if (!origin || !originOk(req)) { socket.destroy(); return; }
   if (!auth.valid(Auth.parseCookies(req.headers.cookie).webpi_session)) {
-    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return;
+    socket.write(`HTTP/1.1 401 Unauthorized\r\n${securityHeaderBlock()}\r\n`);
+    socket.destroy();
+    return;
   }
   wss.handleUpgrade(req, socket, head, ws => attach(ws));
 });
