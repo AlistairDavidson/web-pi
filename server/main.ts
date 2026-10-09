@@ -112,6 +112,17 @@ const route = (p: string): string => (CFG.base === '/' ? p : CFG.base + p);
 const stateDb = new StateDb(CFG.dbFile);
 const auth: AuthType = new Auth(stateDb);
 const hiddenSessions = new HiddenSessions(stateDb);
+// In-process job scheduler (src/lib/jobs.ts): definitions + run
+// bookkeeping live in the state db; fires open tmux sessions on the app's
+// socket under the same job-session conventions as interactive sessions.
+const scheduler = new jobs.Scheduler(stateDb, { cwd: CFG.newSessionCwd, env: sessionEnv });
+scheduler.start();
+// The scheduler's single shutdown hook. The SIGTERM/SIGINT handler is a
+// sibling task (task/session-lifecycle, merged separately); at merge time
+// it calls shutdownScheduler() — wired here so teardown has exactly one
+// spot. Uncalled until then on purpose: the default signal exit tears the
+// process (and the tick interval) down anyway.
+const shutdownScheduler = (): void => scheduler.stop();
 const loginLimiter = new RateLimiter(10, 15 * 60 * 1000);
 const wsLimiter = new RateLimiter(30, 60 * 1000);
 // Password hashes in flight at once. Each scrypt holds 16 MiB and a libuv
@@ -329,32 +340,30 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
     return;
   }
 
-  // Listed with available:false (200) when systemctl --user is unusable —
-  // the /jobs page renders an explanatory notice instead of 500s; the
-  // mutating routes 503 in that case. See src/lib/jobs.ts for the
-  // webpi-* unit conventions and ownership invariant.
+  // Jobs are served by the in-process scheduler (src/lib/jobs.ts) —
+  // available everywhere the server runs, container included; there is
+  // no degraded mode anymore.
   if (url === route('/api/jobs') || url.startsWith(route('/api/jobs/'))) {
     const sub = url.slice(route('/api/jobs').length);
-    const jobCtx = { cwd: CFG.newSessionCwd, env: sessionEnv };
     const fail = (e: Error): void => sendJSON(res, 500, { error: e.message });
     const reply = (r: jobs.JobOp): void => sendJSON(res, r.ok ? 200 : r.status,
       r.ok ? { name: r.name, session: r.session ?? null } : { error: r.error, detail: r.detail });
 
     if (req.method === 'GET' && sub === '') {
-      jobs.listJobs().then(st => sendJSON(res, 200, st)).catch(fail);
+      scheduler.listJobs().then(st => sendJSON(res, 200, st)).catch(fail);
       return;
     }
     if (req.method === 'POST' && (sub === '' || sub === '/validate')) {
       readBody(req, (err, body) => {
         if (err) { send(res, 400, 'bad request'); return; }
         if (sub === '/validate') {
-          jobs.checkCalendar(String(body?.schedule ?? '')).then(c => sendJSON(res, 200, c)).catch(fail);
+          sendJSON(res, 200, jobs.checkCron(String(body?.schedule ?? '')));
         } else {
-          jobs.saveJob({
+          scheduler.saveJob({
             name: String(body?.name ?? ''),
             schedule: String(body?.schedule ?? ''),
             command: String(body?.command ?? ''),
-          }, jobCtx).then(reply).catch(fail);
+          }).then(reply).catch(fail);
         }
       });
       return;
@@ -363,14 +372,14 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
     if (req.method === 'POST' && runNow) {
       const name = decodeSegment(runNow[1]!);
       if (name === null) { send(res, 400, 'bad job name'); return; }
-      jobs.runJob(name).then(reply).catch(fail);
+      scheduler.runJob(name).then(reply).catch(fail);
       return;
     }
     const remove = sub.match(/^\/([^/]+)$/);
     if (req.method === 'DELETE' && remove) {
       const name = decodeSegment(remove[1]!);
       if (name === null) { send(res, 400, 'bad job name'); return; }
-      jobs.deleteJob(name).then(reply).catch(fail);
+      scheduler.deleteJob(name).then(reply).catch(fail);
       return;
     }
     send(res, 404, 'not found');
