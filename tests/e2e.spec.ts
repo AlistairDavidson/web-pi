@@ -5,6 +5,7 @@
 // Runs serially (workers: 1) — see playwright.config.ts.
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { expect, test, type Cookie, type Page } from '@playwright/test';
 import { MARKER, PASSWORD, TMUX_SOCKET, USERNAME, UUIDV7_SIBLINGS, WORKSPACE } from './env';
@@ -516,6 +517,145 @@ test('settings dashboard shows effective config; update dry-run is check-only', 
   expect(dry.body.ok).toBe(true);
   expect(dry.body.dryRun).toBe(true);
   expect(dry.body.output).toContain('would run');
+});
+
+// ---- /api/state scan (async fs + title cache) over a populated store ----
+// Bulk sessions for the scan tests: 205 valid two-line .jsonl files (session
+// header + first user message) in their own scope, aged strictly between the
+// two alpha fixtures (30 min and 24 h) so the newest-first order is
+// unambiguous. 205 + 5 fixtures = 210 → the MAX_FILES=200 cap drops the 10
+// oldest (the 4 older fixtures + bulk 199..204).
+const BULK_SCOPE = 'bulk';
+const BULK_COUNT = 205;
+const CACHE_ID = 'dddddddd-dddd-4000-8000-dddddddddddd';
+const bulkId = (i: number): string => `cccccccc-cccc-4000-8000-${(0xcafe00000000 + i).toString(16).padStart(12, '0')}`;
+const bulkTitle = (i: number): string => `bulk task ${i.toString().padStart(3, '0')}: migrate the widget registry`;
+
+/** One /api/state poll via in-page fetch → Map<id, {title, mtime}>. */
+async function pollSessions(page: Page): Promise<Map<string, { title: string; mtime: number }>> {
+  const rows = await page.evaluate(async () => {
+    const r = await fetch('/api/state');
+    const body = await r.json() as { sessions: Array<{ id: string; title: string; mtime: number }> };
+    return { status: r.status, sessions: body.sessions.map(s => [s.id, s.title, s.mtime] as const) };
+  });
+  expect(rows.status).toBe(200);
+  return new Map(rows.sessions.map(([id, title, mtime]) => [id as string, { title: title as string, mtime: mtime as number }]));
+}
+
+test('/api/state lists the fixture + bulk sessions newest-first with correct titles and the 200 cap', async ({ page }) => {
+  const dir = path.join(WORKSPACE, 'sessions', BULK_SCOPE);
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  const now = Date.now();
+  for (let i = 0; i < BULK_COUNT; i++) {
+    const file = path.join(dir, `2026-10-02T12-30-00_${bulkId(i)}.jsonl`);
+    fs.writeFileSync(file, [
+      JSON.stringify({ type: 'session', id: bulkId(i), timestamp: '2026-10-02T12:30:00.000Z', cwd: '/home/tester/bulk-proj' }),
+      JSON.stringify({ type: 'message', message: { role: 'user', content: bulkTitle(i) } }),
+    ].join('\n') + '\n');
+    const when = new Date(now - (40 + i * 5) * 60_000);
+    fs.utimesSync(file, when, when);
+  }
+
+  await login(page);
+  // The Map preserves the response's array order — assert on that, not a
+  // client-side re-sort, so an unordered response can't pass.
+  const sessions = [...(await pollSessions(page)).entries()].map(([id, e]) => ({ id, ...e }));
+
+  // Capped at MAX_FILES=200: fixture A (newest, 30 min) + bulk 0..198
+  // (40 min … 1030 min).
+  expect(sessions).toHaveLength(200);
+  for (let i = 1; i < sessions.length; i++) {
+    expect(sessions[i].mtime).toBeLessThanOrEqual(sessions[i - 1].mtime);
+  }
+  expect(sessions[0].id).toBe(FIXTURE_A);
+  expect(sessions[0].title).toBe('fix the login bug in auth module');
+  const keptBulk = 199; // 200 minus fixture A's slot
+  for (let i = 0; i < keptBulk; i++) {
+    expect(sessions[i + 1].id).toBe(bulkId(i));
+    expect(sessions[i + 1].title).toBe(bulkTitle(i));
+  }
+
+  // The 10 oldest fell off the cap: the four older fixtures and the
+  // oldest bulk files (199..204).
+  const ids = new Set(sessions.map(s => s.id));
+  for (const absent of [FIXTURE_B, '33333333-3333-3333-3333-333333333333', ...UUIDV7_SIBLINGS,
+    ...Array.from({ length: BULK_COUNT - keptBulk }, (_, k) => bulkId(keptBulk + k))]) {
+    expect(ids.has(absent)).toBe(false);
+  }
+});
+
+test('/api/state title cache: untouched files reuse their entry, an mtime bump re-reads', async ({ page }) => {
+  await login(page);
+
+  // A header-only session: no first user message yet → '(no preview)'.
+  const dir = path.join(WORKSPACE, 'sessions', 'cachetest');
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `2026-10-02T13-00-00_${CACHE_ID}.jsonl`);
+  fs.writeFileSync(file, JSON.stringify({ type: 'session', id: CACHE_ID, timestamp: '2026-10-02T13:00:00.000Z', cwd: '/tmp/cache-check' }) + '\n');
+
+  const first = await pollSessions(page);
+  expect(first.get(CACHE_ID)?.title).toBe('(no preview)');
+
+  // Append a first user message — only an mtime-keyed cache notices.
+  fs.appendFileSync(file, JSON.stringify({ type: 'message', message: { role: 'user', content: 'cache invalidation probe' } }) + '\n');
+  const when = new Date(Date.now() + 5000); // future mtime: can't collide with the cached one
+  fs.utimesSync(file, when, when);
+
+  const second = await pollSessions(page);
+  expect(second.get(CACHE_ID)?.title).toBe('cache invalidation probe');
+  expect(second.get(CACHE_ID)!.mtime).toBeGreaterThan(first.get(CACHE_ID)!.mtime);
+
+  // Untouched files answer identically across polls — cached, not re-derived.
+  for (const [id, entry] of first) {
+    if (id === CACHE_ID) continue;
+    expect(second.get(id)).toEqual(entry);
+  }
+
+  fs.rmSync(dir, { recursive: true, force: true }); // gone before the next test's scan
+});
+
+test('/api/state poll stays fast and terminal traffic keeps flowing during it', async ({ page }) => {
+  test.setTimeout(60_000);
+  await login(page);
+
+  // The cache-probe file from the previous test must have left the list.
+  expect((await pollSessions(page)).has(CACHE_ID)).toBe(false);
+
+  // Force the heavy path: bump every bulk mtime so the poll re-reads
+  // ~200 files instead of being answered from the title cache.
+  const dir = path.join(WORKSPACE, 'sessions', BULK_SCOPE);
+  const names = fs.readdirSync(dir);
+  const now = Date.now();
+  for (const [i, f] of names.entries()) {
+    const when = new Date(now - i * 1000);
+    fs.utimesSync(path.join(dir, f), when, when);
+  }
+
+  const timed = await page.evaluate(async () => {
+    const t0 = performance.now();
+    const r = await fetch('/api/state');
+    const body = await r.json() as { sessions: unknown[] };
+    return { ms: performance.now() - t0, status: r.status, n: body.sessions.length };
+  });
+  expect(timed.status).toBe(200);
+  expect(timed.n).toBe(200);
+  expect(timed.ms).toBeLessThan(2000); // loose smoke: ~200 × 64 KiB reads, off the event loop
+
+  // Liveness: keystrokes reach the pty and output renders while a poll is
+  // in flight — the scan must never freeze the terminal WS.
+  await page.fill('wa-input#new-name input', 'itest-poll-live');
+  await page.click('wa-button#new-btn');
+  await waitForTermText(page, MARKER, 20_000);
+  await page.locator('agent-terminal .terminal-container').click();
+  const poll = page.evaluate(async () => (await fetch('/api/state')).status);
+  await page.keyboard.type('echo LIVE_$((40+2))\n');
+  expect(await poll).toBe(200);
+  await waitForTermText(page, 'LIVE_42', 10_000);
+
+  // Tidy: drop the generated store so nothing after sees the bulk files.
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test('login rate limit kicks in (10 per 15 min per IP) and ignores a spoofed X-Forwarded-For', async ({ request }) => {
