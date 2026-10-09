@@ -14,17 +14,19 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import * as pty from 'node-pty';
 import { Auth, RateLimiter, type Auth as AuthType } from '../src/lib/auth';
 import { listSessions, findSession } from '../src/lib/sessions';
-import { HiddenSessions, SESSION_ID_RE } from '../src/lib/hidden-sessions';
+import { HiddenSessions } from '../src/lib/hidden-sessions';
 import { StateDb } from '../src/lib/db';
 import * as tmux from '../src/lib/tmux';
 import { ENV, RAW_ENV, APP_ROOT, PI_BIN, PI_AGENT_DIR, PI_SESSION_DIR } from '../src/lib/env';
 import * as jobs from '../src/lib/jobs';
+import * as api from '../src/lib/api';
 import {
   autoUpdateEnabled, lastCheck, lastUpdate, AutoUpdater,
 } from '../src/lib/auto-update';
 import {
   BUSY_ERROR, PI_PACKAGE, appVersion, npmPath, piDeclared, piInstalled, runPiUpdate,
 } from '../src/lib/settings';
+import { parseClientMsg } from '../src/lib/types';
 import type { ClientMsg, ServerMsg, ConsoleState, SettingsState } from '../src/lib/types';
 
 // URL base path ('/' or '/foo', no trailing slash). Must match the base
@@ -374,11 +376,12 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
     if (!loginLimiter.allow(ipOf(req))) { send(res, 429, 'too many attempts'); return; }
     readBody(req, (err, body) => {
       if (err) { send(res, 400, 'bad request'); return; }
-      const username = body?.username, password = body?.password;
-      if (typeof username !== 'string' || typeof password !== 'string') {
+      const parsed = api.loginBody.safeParse(body);
+      if (!parsed.success) {
         send(res, 401, 'invalid credentials'); // nginx logs it; fail2ban watches
         return;
       }
+      const { username, password } = parsed.data;
       if (loginVerifying >= MAX_LOGIN_VERIFY) {
         send(res, 503, 'busy, try again', { 'Retry-After': '1' });
         return;
@@ -477,8 +480,9 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
   if (req.method === 'POST' && url === route('/api/new')) {
     readBody(req, (err, body) => {
       if (err) { send(res, 400, 'bad request'); return; }
-      const raw = String(body?.name ?? '');
-      const name = raw.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-')
+      const parsed = api.newSessionBody.safeParse(body);
+      if (!parsed.success) { send(res, 400, api.firstIssue(parsed.error)); return; }
+      const name = parsed.data.name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-')
         .replace(/^-+|-+$/g, '').slice(0, 30);
       if (!name) { send(res, 400, 'name required'); return; }
       tmux.newSession(name, CFG.newSessionCwd, CFG.command, sessionEnv, err2 => {
@@ -516,13 +520,13 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
       readBody(req, (err, body) => {
         if (err) { send(res, 400, 'bad request'); return; }
         if (sub === '/validate') {
-          sendJSON(res, 200, jobs.checkCron(String(body?.schedule ?? '')));
+          const parsed = api.jobValidateBody.safeParse(body);
+          if (!parsed.success) { send(res, 400, api.firstIssue(parsed.error)); return; }
+          sendJSON(res, 200, jobs.checkCron(parsed.data.schedule));
         } else {
-          scheduler.saveJob({
-            name: String(body?.name ?? ''),
-            schedule: String(body?.schedule ?? ''),
-            command: String(body?.command ?? ''),
-          }).then(reply).catch(fail);
+          const parsed = api.jobSaveBody.safeParse(body);
+          if (!parsed.success) { send(res, 400, api.firstIssue(parsed.error)); return; }
+          scheduler.saveJob(parsed.data).then(reply).catch(fail);
         }
       });
       return;
@@ -550,9 +554,9 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
   if (req.method === 'POST' && url === route('/api/session/hide')) {
     readBody(req, (err, body) => {
       if (err) { send(res, 400, 'bad request'); return; }
-      const id = typeof body?.id === 'string' ? body.id : '';
-      if (!SESSION_ID_RE.test(id)) { send(res, 400, 'invalid session id'); return; }
-      const saveErr = hiddenSessions.hide(id);
+      const parsed = api.hideBody.safeParse(body);
+      if (!parsed.success) { send(res, 400, api.firstIssue(parsed.error)); return; }
+      const saveErr = hiddenSessions.hide(parsed.data.id);
       if (saveErr) { sendJSON(res, 500, { error: 'could not save hidden state' }); return; }
       sendJSON(res, 200, { ok: true });
     });
@@ -562,14 +566,13 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
   if (req.method === 'POST' && url === route('/api/session/unhide')) {
     readBody(req, (err, body) => {
       if (err) { send(res, 400, 'bad request'); return; }
-      const saveErr = body?.all === true
-        ? hiddenSessions.unhideAll()
-        : typeof body?.id === 'string' && SESSION_ID_RE.test(body.id)
-          ? hiddenSessions.unhide(body.id)
-          : new Error('invalid session id');
-      if (!saveErr) { sendJSON(res, 200, { ok: true }); return; }
-      if (saveErr.message === 'invalid session id') { send(res, 400, 'invalid session id'); return; }
-      sendJSON(res, 500, { error: 'could not save hidden state' });
+      const parsed = api.unhideBody.safeParse(body);
+      // Fixed message: a failed parse is always an all/id shape problem,
+      // and zod's own union error would only say 'Invalid input'.
+      if (!parsed.success) { send(res, 400, 'invalid session id'); return; }
+      const saveErr = 'all' in parsed.data ? hiddenSessions.unhideAll() : hiddenSessions.unhide(parsed.data.id);
+      if (saveErr) { sendJSON(res, 500, { error: 'could not save hidden state' }); return; }
+      sendJSON(res, 200, { ok: true });
     });
     return;
   }
@@ -611,7 +614,9 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
   if (req.method === 'POST' && url === route('/api/update-pi')) {
     readBody(req, (err, body) => {
       if (err) { send(res, 400, 'bad request'); return; }
-      runPiUpdate(APP_ROOT, body?.dryRun === true, r => {
+      const parsed = api.updatePiBody.safeParse(body);
+      if (!parsed.success) { send(res, 400, api.firstIssue(parsed.error)); return; }
+      runPiUpdate(APP_ROOT, parsed.data.dryRun, r => {
         sendJSON(res, r.ok ? 200 : (r.error === BUSY_ERROR ? 409 : 500), r);
       });
     });
@@ -728,28 +733,8 @@ function wsSend(ws: WebSocket, msg: ServerMsg): void {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
 }
 
-/** A client frame checked against the ClientMsg shapes — null for anything
- *  else (bad JSON, `null`, arrays, missing/mistyped fields). The types in
- *  types.ts are only a promise about well-behaved clients. */
-function parseClientMsg(raw: string): ClientMsg | null {
-  let v: unknown;
-  try { v = JSON.parse(raw); } catch { return null; }
-  if (typeof v !== 'object' || v === null || Array.isArray(v)) return null;
-  const m = v as Record<string, unknown>;
-  switch (m.type) {
-    case 'input':
-      return typeof m.data === 'string' ? { type: 'input', data: m.data } : null;
-    case 'resize':
-      return typeof m.cols === 'number' && typeof m.rows === 'number'
-        ? { type: 'resize', cols: m.cols, rows: m.rows } : null;
-    case 'attach':
-      if (m.mode === 'live' && typeof m.target === 'string') return { type: 'attach', mode: 'live', target: m.target };
-      if (m.mode === 'resume' && typeof m.id === 'string') return { type: 'attach', mode: 'resume', id: m.id };
-      return null;
-    default:
-      return null;
-  }
-}
+// parseClientMsg (the client-frame gate) lives in src/lib/types.ts with
+// the zod schemas ClientMsg is derived from.
 
 // Keepalive: a ping per connection this often. Idle-timeout proxies (ALB
 // defaults to 60s; nginx's proxy_read_timeout) count it as traffic, so a

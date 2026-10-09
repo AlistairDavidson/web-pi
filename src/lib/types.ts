@@ -1,6 +1,8 @@
 // Shared types across server + client (the WS wire protocol is
 // described exactly once, on both ends).
 
+import { z } from 'zod';
+
 export interface PastSession {
   /** pi session id (uuid) — resume target */
   id: string;
@@ -151,14 +153,38 @@ export interface UpdateResult {
 }
 
 // ---- WS wire protocol (JSON envelopes) ----
-// The server checks every client frame against these shapes
-// (parseClientMsg, server/main.ts) and drops anything else. A big paste
-// arrives as several consecutive input frames (agent-terminal.ts chunks it).
-export type ClientMsg =
-  | { type: 'attach'; mode: 'live'; target: string }
-  | { type: 'attach'; mode: 'resume'; id: string }
-  | { type: 'input'; data: string }
-  | { type: 'resize'; cols: number; rows: number };
+// Client frames are validated against these schemas (parseClientMsg
+// below, called by server/main.ts on every frame); ClientMsg is z.infer'd
+// from the same schemas, so the wire protocol is described exactly once,
+// shapes and types together. A big paste arrives as several consecutive
+// input frames (agent-terminal.ts chunks it). ServerMsg (below) stays a
+// hand-written union: it is server→client only and never parsed.
+const inputMsg = z.object({ type: z.literal('input'), data: z.string() });
+const resizeMsg = z.object({ type: z.literal('resize'), cols: z.number(), rows: z.number() });
+const attachLiveMsg = z.object({ type: z.literal('attach'), mode: z.literal('live'), target: z.string() });
+const attachResumeMsg = z.object({ type: z.literal('attach'), mode: z.literal('resume'), id: z.string() });
+// Not z.discriminatedUnion('type', …): the two attach variants share the
+// 'attach' discriminator value and zod v4 rejects duplicates — this flat
+// union has identical semantics. Member order follows the hot path:
+// input (every keystroke/chunk) first, resize next, attach variants last
+// (once per connection). Unknown extra keys are tolerated (stripped),
+// exactly like the hand-rolled checks this replaced. One known delta:
+// zod's z.number() is finite-only, so a resize with an overflowing JSON
+// number (1e999 → Infinity, accepted-then-clamped before) is now dropped
+// — unreachable from the real client (xterm sends integer dims) and the
+// designed failure mode for junk frames.
+const clientMsgSchema = z.union([inputMsg, resizeMsg, attachLiveMsg, attachResumeMsg]);
+export type ClientMsg = z.infer<typeof clientMsgSchema>;
+
+/** One client frame, or null for anything the schemas reject (bad JSON,
+ *  `null`, arrays, non-objects, missing/mistyped fields, unknown type) —
+ *  callers DROP malformed frames, they are never thrown on. */
+export function parseClientMsg(raw: string): ClientMsg | null {
+  let v: unknown;
+  try { v = JSON.parse(raw); } catch { return null; }
+  const r = clientMsgSchema.safeParse(v);
+  return r.success ? r.data : null;
+}
 
 export type ServerMsg =
   | { type: 'attached'; target: string; socket: string }
