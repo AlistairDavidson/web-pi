@@ -28,23 +28,42 @@ RUN apt-get update \
       tmux git ripgrep ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-# /state is where compose points WEB_PI_STATE_DIR (webpi.db, pi-agent/) —
-# created node-owned here so a fresh named volume mounted on it inherits
-# that ownership instead of the root:root an empty volume starts with.
-RUN mkdir /app /state && chown node:node /app /state
+# Privilege split (DESIGN_REVIEW §1.1), one image / two roles:
+#   web       — uid node (base image): serves HTTP/WS from /opt/web-pi,
+#               ROOT-owned below (no --chown) so it is immutable to the
+#               app user; owns web state on /state; only a tmux CLIENT.
+#   workspace — uid 2000 (user `workspace`): runs the tmux server and
+#               every pi session (docker-workspace-entrypoint.sh).
+# `webpi` (fixed gid 2001) is the shared group: the socket dir is
+# 2770/setgid webpi, tmux's socket gets chmod 0660 + chgrp webpi, and
+# umask 0007 on the workspace side keeps pi's session files group-
+# readable so the web sidebar can list them. Both users exist in BOTH
+# containers (same image) — tmux's `server-access` admits by NAME.
+RUN groupadd -g 2001 webpi \
+ && useradd -u 2000 -g webpi -m -s /bin/bash workspace \
+ && usermod -aG webpi node
 
-# --chown sets ownership inside the COPY layer; a separate `chown -R`
-# after the fact copy-ups every file again (~470MB dead layer). The
-# entrypoint stays root-owned — exec needs only the mode bit — so the app
-# user can't rewrite its own bootstrap; the chmod guards contexts that
-# drop mode bits (e.g. Windows checkouts).
-COPY --chown=node:node --from=build /repo /opt/web-pi
+# /state is where compose points WEB_PI_STATE_DIR (webpi.db — web-side
+# state) — created node-owned here so a fresh named volume mounted on it
+# inherits that ownership instead of the root:root an empty volume starts
+# with.
+RUN mkdir /state && chown node:node /state
+
+# Root-owned app copy (immutable to the node user — the split's point;
+# the old --chown=node:node made the server rewriteable by its own
+# sessions). Workspace mounts/checkouts live on the webpi-workspace
+# volume instead. The entrypoints stay root-owned — exec needs only the
+# mode bit — and the chmod guards contexts that drop mode bits.
+COPY --from=build /repo /opt/web-pi
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
+COPY docker-workspace-entrypoint.sh /usr/local/bin/docker-workspace-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh /usr/local/bin/docker-workspace-entrypoint.sh
 
 USER node
+# /app stays the dev profile's bind target (WORKDIR auto-creates it); the
+# web service runs from /opt/web-pi via compose `working_dir` — no volume
+# shadows either copy anymore.
 WORKDIR /app
-VOLUME /app
 EXPOSE 3000
 ENV NODE_ENV=production
 ENV WEB_PI_HOST=0.0.0.0

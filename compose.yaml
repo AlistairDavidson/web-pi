@@ -1,15 +1,32 @@
-# web-pi — one image, two modes.
+# web-pi — one image; in prod, two containers (privilege split,
+# DESIGN_REVIEW §1.1) + a one-shot init; in dev, a single-user container.
 #
-#   prod:  docker compose up -d                    → loopback :3000, reverse-proxy TLS in front
-#   dev:   docker compose --profile dev up dev     → dev servers with the repo bind-mounted
+#   prod:  docker compose up -d   → loopback :3000, reverse-proxy TLS in front
 #
-# Name the `dev` service (as above): services without profiles (webpi) start
-# on every `up`, so a bare `--profile dev up` would boot prod alongside.
+#     webpi      uid node   — serves HTTP/WS from the image's root-owned
+#                            /opt/web-pi (immutable to the app user); owns
+#                            web state (webpi.db) on /state; only a tmux
+#                            CLIENT on the shared socket.
+#     workspace  uid 2000   — owns the tmux server and every pi session;
+#                            checkouts + pi-agent live on the
+#                            webpi-workspace volume; the web user is
+#                            admitted as a tmux client via server-access.
+#     workspace-init (one-shot) — chowns/chmods the shared volumes: socket
+#                            dir 2770 setgid webpi, /workspace owned by
+#                            uid 2000 (same pattern as dev-init below).
 #
-# Both modes treat /app as the living project: prod seeds a named volume
-# from the image on first boot (never re-seeds); dev bind-mounts the host
-# checkout. pi is an npm dependency pinned by the lockfile — image rebuilds
-# are for toolchain/app changes; pi updates happen in place on the volume.
+#   dev:   docker compose --profile dev up dev     → single-user dev servers
+#          with the repo bind-mounted (the split is a prod shape; dev
+#          stays one container).
+#
+# Name the `dev` service (as above): services without profiles (webpi,
+# workspace, workspace-init) start on every `up`, so a bare
+# `--profile dev up` would boot prod alongside.
+#
+# pi is an npm dependency pinned by the lockfile, vendored in the image at
+# /opt/web-pi/node_modules — the workspace container runs it from there
+# (same image ⇒ same path); updating pi in the split is an image rebuild
+# or a workspace-side checkout (README "Updating").
 #
 # Dev runs as ${UID:-1000}:${GID:-1000} so the container user matches the
 # host checkout's owner (bash doesn't export UID/GID — `export UID GID`
@@ -17,24 +34,29 @@
 
 name: web-pi
 
+x-webpi-build: &webpi-build
+  context: .
+  target: prod # slim: no compiler toolchain (dev target has it)
+  args:
+    # Baked into the pages at build time AND needed at runtime — keep in sync.
+    WEB_PI_BASE: ${WEB_PI_BASE:-/}
+
 services:
   webpi:
-    build:
-      context: .
-      target: prod # slim: no compiler toolchain (dev target has it)
-      args:
-        # Baked into the pages at build time AND needed at runtime — keep in sync.
-        WEB_PI_BASE: ${WEB_PI_BASE:-/}
+    depends_on:
+      workspace-init:
+        condition: service_completed_successfully
+    build: *webpi-build
     # web-pi:local is built on this box (below). To run a CI-built image
     # instead (release tags publish ghcr.io/<owner>/web-pi), set WEB_PI_IMAGE
     # and `docker compose pull webpi` before `up -d` — README "Deploying".
     # The pulled image's build-time WEB_PI_BASE still applies.
     image: ${WEB_PI_IMAGE:-web-pi:local}
-    # tini as PID 1: reaps reparented processes (daemonised tmux server),
-    # and relays signals to node as PID 1's direct child (the SIGTERM
-    # handler drains websockets + stops the scheduler and exits 0 within
-    # ~5s; without an init, PID-1 node would drop an unhandled SIGTERM
-    # and burn the full grace before SIGKILL).
+    # tini as PID 1: reaps reparented processes, and relays signals to node
+    # as PID 1's direct child (the SIGTERM handler drains websockets +
+    # stops the scheduler and exits 0 within ~5s; without an init, PID-1
+    # node would drop an unhandled SIGTERM and burn the full grace before
+    # SIGKILL).
     init: true
     # Block setuid/file-cap elevation inside the container — sessions must
     # never climb to root-in-container (the first step of most escapes).
@@ -42,21 +64,78 @@ services:
     security_opt: ["no-new-privileges:true"]
     ports:
       - "127.0.0.1:3000:3000" # loopback publish; TLS reverse proxy in front (deploy/)
+    working_dir: /opt/web-pi # serve the image copy — no /app volume anymore
     environment:
       WEB_PI_BASE: ${WEB_PI_BASE:-/}
-      WEB_PI_NEW_SESSION_CWD: /app # sessions start in the living project
       # One proxy hop (deploy/nginx-webpi.conf): rate limits key on the IP
       # nginx appended to X-Forwarded-For. Safe with the loopback-only
       # publish below — only local processes can reach the port directly.
       WEB_PI_TRUST_PROXY: 1
-      # All state (webpi.db, pi-agent/ — pi credentials + sessions) on its
-      # own volume, entirely outside the entrypoint-synced /app: image
-      # syncs can't touch it by construction, not by .dockerignore hygiene.
+      # Web state only (login db, hidden sessions, jobs) on its own volume.
       WEB_PI_STATE_DIR: /state
+      # --- privilege-split wiring. These paths resolve in the WORKSPACE
+      # container (its tmux server spawns every session), so both
+      # containers mount the shared volumes at the same mount points.
+      # Absolute socket path ⇒ tmux -S + the never-fork guard
+      # (src/lib/tmux.ts); the workspace entrypoint owns the server.
+      WEB_PI_TMUX_SOCKET: /run/web-pi/tmux
+      # HOME handed to spawned pi — /home/workspace is uid 2000's home
+      # over there (writable; the node image's /home/node is not).
+      WEB_PI_HOME: /home/workspace
+      # pi's runtime dir (credentials + sessions) rides with the workspace
+      # uid; WEB_PI_SESSIONS_DIR derives to /workspace/pi-agent/sessions —
+      # what the sidebar scans (web reads it via the shared group).
+      WEB_PI_AGENT_DIR: /workspace/pi-agent
+      WEB_PI_NEW_SESSION_CWD: /workspace
     volumes:
-      - webpi-app:/app
       - webpi-state:/state
+      # Read access to pi's session store (sidebar/resume); web never
+      # writes here — hidden flags live in its own db on /state. :ro makes
+      # that a container-level fact, not just a convention (the session
+      # cwd /workspace only needs to exist, which :ro preserves).
+      - webpi-workspace:/workspace:ro
+      - webpi-tmux:/run/web-pi
     restart: unless-stopped
+
+  # The working half of the split: same image, uid 2000, owns the tmux
+  # server (exit-empty off) and every pi session. Admits the web user
+  # (node) as a tmux client via server-access on the shared socket.
+  workspace:
+    depends_on:
+      workspace-init:
+        condition: service_completed_successfully
+    build: *webpi-build # same build as webpi (BuildKit dedupes); declared so a cold machine never tries to PULL web-pi:local (cf. dev-init)
+    image: ${WEB_PI_IMAGE:-web-pi:local}
+    user: "workspace"
+    init: true
+    security_opt: ["no-new-privileges:true"]
+    entrypoint: ["/usr/local/bin/docker-workspace-entrypoint.sh"]
+    healthcheck:
+      disable: true # the image's healthcheck probes the web server; this container only runs tmux
+    environment:
+      WEB_PI_TMUX_SOCKET: /run/web-pi/tmux
+      WEB_PI_AGENT_DIR: /workspace/pi-agent
+      WEB_PI_TMUX_WEB_USER: node # admitted as a tmux client by NAME
+      WEB_PI_TMUX_GROUP: webpi # socket group after chgrp (gid 2001 in-image)
+    volumes:
+      - webpi-tmux:/run/web-pi # the shared socket (0660 webpi after the entrypoint's chmod/chgrp)
+      - webpi-workspace:/workspace # checkouts + pi-agent (umask 0007 keeps files group-shared)
+    restart: unless-stopped
+
+  # One-shot: empty named volumes are created root-owned; the split needs
+  # the socket dir 2770 setgid webpi (socket creation + group inheritance)
+  # and /workspace owned by uid 2000. Runs on every `up` — a no-op chown
+  # once ownership is right. (Entrypoint overridden: the web entrypoint
+  # must not run here.)
+  workspace-init:
+    build: *webpi-build
+    image: ${WEB_PI_IMAGE:-web-pi:local}
+    user: "0:0"
+    entrypoint: ["sh", "-c", "chown workspace:webpi /run/web-pi /workspace && chmod 2770 /run/web-pi /workspace"]
+    restart: "no"
+    volumes:
+      - webpi-tmux:/run/web-pi
+      - webpi-workspace:/workspace
 
   # One-shot: empty named volumes are created root-owned; the dev service
   # runs as ${UID:-1000} and must write node_modules. Runs on every `up` — a
@@ -97,12 +176,9 @@ services:
     # privilege elevation.
     init: true
     security_opt: ["no-new-privileges:true"]
-    # Neutralise the image's seed/sync entrypoint: /app is a bind mount of
-    # the host checkout, and the entrypoint's rm -rf/cp -a sync must never
-    # run against it. Today it's saved only by the host .git sentinel (the
-    # "operator-owned git checkout" branch) — a git-less bind target would
-    # get its top-level entries rm -rf'd and overwritten from the image.
-    # dev never wants seeding; WORKDIR /app already covers the cd.
+    # Neutralise the image's entrypoint: /app is a bind mount of the host
+    # checkout, and the entrypoint serves the image copy — dev wants the
+    # bind. WORKDIR /app already covers the cd.
     entrypoint: []
     # The repo is bind-mounted; node_modules is a *shadow* volume so the
     # container builds its own native deps (node-pty) without touching the
@@ -136,11 +212,17 @@ services:
     # no restart policy: dev is an interactive foreground thing
 
 volumes:
-  # Explicit names (no project prefix) so the app volume stays stable across
+  # Explicit names (no project prefix) so the volumes stay stable across
   # checkouts with different directory names.
-  webpi-app:
-    name: webpi-app
   webpi-state:
     name: webpi-state
+  # Split volumes: the shared tmux socket dir, and the workspace uid's
+  # tree (checkouts + pi-agent). The pre-split webpi-app volume is
+  # obsolete (web serves from the image now) and is left in place,
+  # unused, on existing hosts.
+  webpi-tmux:
+    name: webpi-tmux
+  webpi-workspace:
+    name: webpi-workspace
   webpi-dev-node-modules:
     name: webpi-dev-node-modules
