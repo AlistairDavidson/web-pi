@@ -12,6 +12,7 @@
     "build": "astro build && tsc -p tsconfig.server.json",
     "start": "node dist-server/server/main.js",
     "set-password": "node dist-server/server/set-password.js",
+    "test:unit": "node --test tests/unit/jobs.test.mjs",
     "test:e2e": "playwright test"
   },
   "dependencies": {
@@ -24,6 +25,7 @@
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0",
     "astro": "^7.0.0",
+    "cron-parser": "^5.10.1",
     "node-pty": "^1.0.0",
     "typescript": "^5.8.0",
     "ws": "^8.18.0"
