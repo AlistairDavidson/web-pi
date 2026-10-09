@@ -349,27 +349,40 @@ test('jobs page degrades to a notice when systemctl --user is absent', async ({ 
   await login(page);
   await expect(page.locator('wa-button#nav-jobs')).toHaveCount(1);
 
-  const r = await page.request.get('/api/jobs');
-  expect(r.status()).toBe(200);
-  expect(await r.json()).toMatchObject({ available: false, jobs: [] });
+  // Authed API calls go through the page, not page.request: Playwright's
+  // API client doesn't send the Secure session cookie over the suite's
+  // plain-http origin (AGENTS.md) — same reason the calls below use it.
+  const api = (method: string, url: string, body?: unknown): Promise<{ status: number; body: unknown }> =>
+    page.evaluate(async ([m, u, b]) => {
+      const res = await fetch(u!, {
+        method: m!, headers: { 'Content-Type': 'application/json' },
+        ...(b === undefined ? {} : { body: JSON.stringify(b) }),
+      });
+      let json: unknown = null;
+      try { json = await res.json(); } catch { /* non-JSON body */ }
+      return { status: res.status, body: json };
+    }, [method, url, body] as const);
+
+  const r = await api('GET', '/api/jobs');
+  expect(r.status).toBe(200);
+  expect(r.body).toMatchObject({ available: false, jobs: [] });
 
   await page.goto('/jobs');
   await expect(page.locator('wa-callout#jobs-degraded:not(.hidden)')).toBeVisible();
   await expect(page.locator('wa-callout#jobs-degraded')).toContainText('systemctl --user');
   await expect(page.locator('wa-button#jobs-new.hidden')).toHaveCount(1);
 
-  const validate = await page.request.post('/api/jobs/validate', { data: { schedule: 'daily 08:00' } });
-  expect(validate.status()).toBe(200);
-  const check = await validate.json() as { valid: boolean; validatedBy: string };
+  const validate = await api('POST', '/api/jobs/validate', { schedule: 'daily 08:00' });
+  expect(validate.status).toBe(200);
+  const check = validate.body as { valid: boolean; validatedBy: string };
   expect(check.valid).toBe(true);
   expect(['basic', 'systemd-analyze']).toContain(check.validatedBy);
 
   // Mutations degrade to 503 (not 500) while the backend is unusable.
-  const create = await page.request.post('/api/jobs',
-    { data: { name: 'itest-job', schedule: 'daily 08:00', command: 'true' } });
-  expect(create.status()).toBe(503);
-  expect((await page.request.post('/api/jobs/itest-job/run')).status()).toBe(503);
-  expect((await page.request.delete('/api/jobs/itest-job')).status()).toBe(503);
+  const create = await api('POST', '/api/jobs', { name: 'itest-job', schedule: 'daily 08:00', command: 'true' });
+  expect(create.status).toBe(503);
+  expect((await api('POST', '/api/jobs/itest-job/run')).status).toBe(503);
+  expect((await api('DELETE', '/api/jobs/itest-job')).status).toBe(503);
 });
 
 test('hide: session leaves the sidebar, manage dialog restores it', async ({ page }) => {
