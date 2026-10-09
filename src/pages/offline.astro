@@ -10,7 +10,8 @@ import "@awesome.me/webawesome/dist/components/button/button.js";
     <wa-card class="offline-card">
       <h1>
         <!-- same prompt glyph as public/icons/icon.svg, inline so the shell
-             needs no icon fetches (wa-icon glyphs come from a CDN) -->
+             needs no icon fetches (other wa-icon glyphs are vendored and
+             served — and service-worker-precached — from public/icons/wa) -->
         <svg class="offline-glyph" viewBox="0 0 512 512" aria-hidden="true">
           <path
             d="M168 172 L252 256 L168 340"
@@ -43,6 +44,7 @@ import "@awesome.me/webawesome/dist/components/button/button.js";
 <script>
   import "@awesome.me/astro-lit/dsd-polyfill.js";
   import "@awesome.me/astro-lit/hydration-support.js";
+  import "../icons";
   import "@awesome.me/webawesome/dist/components/card/card.js";
   import "@awesome.me/webawesome/dist/components/button/button.js";
 </script>

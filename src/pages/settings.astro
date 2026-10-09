@@ -75,6 +75,9 @@ const base = (import.meta.env.BASE_URL ?? '/').replace(/\/+$/, '');
   // (@awesome.me/astro-lit README). Not script-position-dependent.
   import '@awesome.me/astro-lit/dsd-polyfill.js';
   import '@awesome.me/astro-lit/hydration-support.js';
+  // Vendored glyph libraries must register before any wa-* component
+  // module defines — else upgraded icons fetch from the CDN first.
+  import '../icons';
   // Client-side: define the SSR'd wa-* components (upgrade + hydrate).
   import '@awesome.me/webawesome/dist/components/card/card.js';
   import '@awesome.me/webawesome/dist/components/button/button.js';

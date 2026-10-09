@@ -64,5 +64,6 @@ const base = (import.meta.env.BASE_URL ?? '/').replace(/\/+$/, '');
   // SSR'd elements render twice (DSD copy + fresh Lit render).
   import '@awesome.me/astro-lit/dsd-polyfill.js';
   import '@awesome.me/astro-lit/hydration-support.js';
+  import '../../icons';
   import './console-app.ts';
 </script>

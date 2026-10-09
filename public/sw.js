@@ -9,6 +9,26 @@ const PRECACHE = [
   'icons/icon-512.png',
   'icons/icon-maskable-192.png',
   'icons/icon-maskable-512.png',
+  // Vendored Web Awesome glyphs (public/icons/wa/solid) — the offline
+  // shell and its toast icon render with no network at all.
+  'icons/wa/solid/arrows-rotate.svg',
+  'icons/wa/solid/arrow-left.svg',
+  'icons/wa/solid/circle-check.svg',
+  'icons/wa/solid/circle-info.svg',
+  'icons/wa/solid/clock.svg',
+  'icons/wa/solid/eye.svg',
+  'icons/wa/solid/eye-slash.svg',
+  'icons/wa/solid/folder.svg',
+  'icons/wa/solid/gear.svg',
+  'icons/wa/solid/magnifying-glass.svg',
+  'icons/wa/solid/pencil.svg',
+  'icons/wa/solid/play.svg',
+  'icons/wa/solid/plus.svg',
+  'icons/wa/solid/right-from-bracket.svg',
+  'icons/wa/solid/rotate-right.svg',
+  'icons/wa/solid/terminal.svg',
+  'icons/wa/solid/trash-can.svg',
+  'icons/wa/solid/triangle-exclamation.svg',
 ].map(at);
 
 const FALLBACK_HTML =
