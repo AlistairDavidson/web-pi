@@ -187,6 +187,60 @@ function ipOf(req: http.IncomingMessage): string {
 function decodeSegment(s: string): string | null {
   try { return decodeURIComponent(s); } catch { return null; }
 }
+
+// ---------- origin check (DESIGN_REVIEW §1.2) ----------
+// SameSite=Strict doesn't stop sibling subdomains (same site, not same
+// origin) opening the terminal WS with the cookie attached, and no Origin
+// check existed on the JSON POSTs. The expected origin is derived per
+// request: Host + X-Forwarded-Proto, the latter honoured only behind a
+// trusted proxy (the same right-most-untrusted-hop selection ipOf() uses
+// for X-Forwarded-For — direct connections assume plain http).
+
+/** Request scheme per WEB_PI_TRUST_PROXY: the Nth X-Forwarded-Proto entry
+ *  from the right when proxies are trusted, else http. */
+function protoOf(req: http.IncomingMessage): string {
+  if (CFG.trustProxy === 0) return 'http';
+  const xfp = req.headers['x-forwarded-proto'];
+  const hops = (Array.isArray(xfp) ? xfp.join(',') : xfp ?? '')
+    .split(',').map(h => h.trim().toLowerCase()).filter(Boolean);
+  if (hops.length === 0) return 'http'; // reached us without passing the proxy
+  return hops[Math.max(0, hops.length - CFG.trustProxy)]!;
+}
+
+/** Origin normalised for comparison: lowercase scheme+host, default ports
+ *  (http:80, https:443) stripped — https://x:443 ≡ https://x. Origin never
+ *  carries a path, so only scheme+host+port are compared (WEB_PI_BASE
+ *  mounts don't affect it). Null for anything unparseable (including the
+ *  literal "null" some browsers send from sandboxed frames). */
+function normalizeOrigin(origin: string): string | null {
+  let u: URL;
+  try { u = new URL(origin); } catch { return null; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+  const defPort = u.protocol === 'https:' ? ':443' : ':80';
+  const host = u.host.toLowerCase();
+  return `${u.protocol}//${host.endsWith(defPort) ? host.slice(0, -defPort.length) : host}`;
+}
+
+/** The origin this request may claim, from Host (+ trusted XFP). Null when
+ *  there is no Host header to derive it from. */
+function expectedOrigin(req: http.IncomingMessage): string | null {
+  const host = req.headers.host;
+  if (!host) return null;
+  const proto = protoOf(req);
+  const defPort = proto === 'https' ? ':443' : ':80';
+  const h = host.toLowerCase();
+  return `${proto}://${h.endsWith(defPort) ? h.slice(0, -defPort.length) : h}`;
+}
+
+/** Origin gate for non-GET requests: absent Origin (curl, API clients)
+ *  passes; a present Origin must match the expected origin exactly. */
+function originOk(req: http.IncomingMessage): boolean {
+  const origin = req.headers.origin;
+  if (origin === undefined || origin === '') return true;
+  const expected = expectedOrigin(req);
+  return expected !== null && normalizeOrigin(origin) === expected;
+}
+
 /** Is this path inside the app's base ('/foo' and '/foo/…', or anything for '/')? */
 function underBase(url: string): boolean {
   return CFG.base === '/' || url === CFG.base || url.startsWith(CFG.base + '/');
@@ -229,6 +283,14 @@ const server = http.createServer((req, res) => {
 
 function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
   const url = (req.url ?? '').split('?')[0]!;
+
+  // Every non-GET must be same-origin when it claims any origin at all
+  // (curl & co send no Origin header and pass). Checked before routing —
+  // a mismatched Origin must not touch the login limiter or anything else.
+  if (req.method !== 'GET' && !originOk(req)) {
+    send(res, 403, 'cross-origin request rejected');
+    return;
+  }
 
   if (req.method === 'POST' && url === route('/login')) {
     if (!loginLimiter.allow(ipOf(req))) { send(res, 429, 'too many attempts'); return; }
@@ -469,6 +531,12 @@ server.on('upgrade', (req, socket, head) => {
   const url = (req.url ?? '').split('?')[0]!;
   if (url !== route('/ws')) { socket.destroy(); return; }
   if (!wsLimiter.allow(ipOf(req))) { socket.destroy(); return; }
+  // The terminal is browser-only: an upgrade must carry a matching Origin
+  // (no curl/websocat clients, no cross-site WebSocket hijacking from a
+  // sibling subdomain). Unlike plain HTTP there is no Origin-free path —
+  // a missing header is destroyed, not waved through.
+  const origin = req.headers.origin;
+  if (!origin || !originOk(req)) { socket.destroy(); return; }
   if (!auth.valid(Auth.parseCookies(req.headers.cookie).webpi_session)) {
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return;
   }
