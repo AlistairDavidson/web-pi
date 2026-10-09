@@ -99,6 +99,40 @@ test('absolute socket: 503 + no fork while the workspace server is down; session
       .toContain('workspace tmux server not running');
     expect(fs.existsSync(socket)).toBe(false);
 
+    // Same refusal on the WS resume path: a fixture session in the
+    // sessions dir, attach {mode:'resume'} while the server is down —
+    // resumeSession's create branch must surface the guard's message, not
+    // 'could not start resume session', and still not fork.
+    // (The terminal WS is the one route a browser can drive; it demands
+    // a same-origin Origin header.)
+    const sid = '019f4706-0000-7000-8000-00000000abcd';
+    // <state>/pi-agent/sessions is the default WEB_PI_SESSIONS_DIR for
+    // this child (no override set in its env).
+    const sessDir = path.join(dir, 'pi-agent', 'sessions', 'proj');
+    fs.mkdirSync(sessDir, { recursive: true });
+    fs.writeFileSync(path.join(sessDir, `2026-10-02T10-00-00_${sid}.jsonl`), [
+      JSON.stringify({ type: 'session', id: sid, timestamp: '2026-10-02T10:00:00.000Z', cwd: dir }),
+      JSON.stringify({ type: 'message', message: { role: 'user', content: 'split fixture' } }),
+    ].join('\n') + '\n');
+    // The server was booted before the fixture existed; sessions scan is
+    // directory-per-request, so no restart is needed.
+    const wsErr = await new Promise<string | null>(resolve => {
+      // undici's WebSocket: extra handshake headers ride the options'
+      // `headers` object (its `origin` option is not the Origin header).
+      const w = new WebSocket(`ws://127.0.0.1:${PORT}/ws`, { headers: { origin: BASE, cookie } });
+      const done = (v: string | null): void => { try { w.close(); } catch { /* closing */ } resolve(v); };
+      w.onopen = () => w.send(JSON.stringify({ type: 'attach', mode: 'resume', id: sid }));
+      w.onmessage = ev => {
+        const m = JSON.parse(String(ev.data)) as { type: string; message?: string };
+        if (m.type === 'error') done(m.message ?? null);
+      };
+      w.onclose = () => done(null);
+      w.onerror = () => done(null);
+      setTimeout(() => done(null), 5000).unref?.();
+    });
+    expect(wsErr).toBe('workspace tmux server not running');
+    expect(fs.existsSync(socket)).toBe(false);
+
     // Bring the server up exactly like docker-workspace-entrypoint.sh:
     // umask 0007 + a conf carrying exit-empty off (a separate set-option
     // races the empty server's instant exit) + chmod 0660 (tmux creates
