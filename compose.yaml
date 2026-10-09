@@ -44,8 +44,13 @@ services:
       # nginx appended to X-Forwarded-For. Safe with the loopback-only
       # publish below — only local processes can reach the port directly.
       WEB_PI_TRUST_PROXY: 1
+      # All state (webpi.db, pi-agent/ — pi credentials + sessions) on its
+      # own volume, entirely outside the entrypoint-synced /app: image
+      # syncs can't touch it by construction, not by .dockerignore hygiene.
+      WEB_PI_STATE_DIR: /state
     volumes:
       - webpi-app:/app
+      - webpi-state:/state
     restart: unless-stopped
 
   # One-shot: empty named volumes are created root-owned; the dev service
@@ -108,6 +113,11 @@ services:
       ASTRO_TELEMETRY_DISABLED: "1"
       WEB_PI_BASE: ${WEB_PI_BASE:-/} # same value the pages were built with
       WEB_PI_NEW_SESSION_CWD: /app
+      # HOME is unwritable for non-1000 uids (see npm_config_cache below) and
+      # /app is the host bind — so the $WEB_PI_HOME/.local/state default
+      # won't do here. Dev state (login db, dev pi-agent) is throwaway: it
+      # lives in the container's /tmp and re-set-password after a recreate.
+      WEB_PI_STATE_DIR: /tmp/web-pi-state
       # A non-1000 uid has no passwd entry → HOME=/ → npm's cache is unwritable there
       npm_config_cache: /tmp/.npm
     healthcheck:
@@ -125,5 +135,7 @@ volumes:
   # checkouts with different directory names.
   webpi-app:
     name: webpi-app
+  webpi-state:
+    name: webpi-state
   webpi-dev-node-modules:
     name: webpi-dev-node-modules

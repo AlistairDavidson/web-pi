@@ -5,8 +5,11 @@
 #   /app is a git checkout    → operator owns updates (git pull, rebuild);
 #                               the image never syncs over it
 #   image content changed     → sync app files into the volume, overwriting;
-#                               volume STATE survives (webpi.db, .pi-agent/,
-#                               apps/, anything not in the image)
+#                               anything not in the image survives (apps/, …).
+#                               web-pi state is NOT in /app anymore: compose
+#                               sets WEB_PI_STATE_DIR=/state (own volume) —
+#                               webpi.db and pi-agent/ are out of this sync's
+#                               reach by construction
 #
 # Dev mode bind-mounts the host repo over /app (a git checkout) — the git
 # branch covers it: no seeding, no sync.
