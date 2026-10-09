@@ -141,13 +141,14 @@ directly.
 | `WEB_PI_TRUST_PROXY` | `0` | Reverse-proxy hops in front of the server (nginx = `1`, ALB → nginx = `2`). The login/WS rate limits key on the client IP that many entries from the right of `X-Forwarded-For`; `0` ignores the header and uses the socket peer. Set it to match your proxies: too low and every client shares the proxy's bucket, too high and clients can pick their own |
 | `WEB_PI_BASE` | `/` | URL base path, e.g. `/console` when riding an existing site. **Baked into the pages at build time** — set it before `npm run build` *and* at runtime |
 | `WEB_PI_HOME` | `os.homedir()` | `HOME` for spawned processes (tmux, pi) |
-| `WEB_PI_AGENT_DIR` | `<app root>/.pi-agent` | runtime pi agent dir (config, credentials, sessions for spawned pi) — seeded from the repo's `pi/` template where absent (a stray `PI_CODING_AGENT_DIR` in the server's env is ignored with an error logged) |
+| `WEB_PI_STATE_DIR` | `$WEB_PI_HOME/.local/state/web-pi` | one directory for all web-pi state: the sqlite db (`webpi.db`) and the runtime `pi-agent/` (pi credentials + sessions). Per-path overrides (`WEB_PI_DB_FILE`, `WEB_PI_AGENT_DIR`) still win. In the container compose points it at `/state` on a dedicated volume |
+| `WEB_PI_AGENT_DIR` | `<state dir>/pi-agent` | runtime pi agent dir (config, credentials, sessions for spawned pi) — seeded from the repo's `pi/` template where absent (a stray `PI_CODING_AGENT_DIR` in the server's env is ignored with an error logged) |
 | `WEB_PI_SESSIONS_DIR` | `PI_CODING_AGENT_SESSION_DIR`, else `<agent dir>/sessions` | where to list past pi sessions from |
 | `WEB_PI_NEW_SESSION_CWD` | `$WEB_PI_HOME` | cwd for new sessions |
 | `WEB_PI_COMMAND` | `<app root>/node_modules/.bin/pi` (falls back to `pi` on PATH) | command run in a new session (whitespace-split; resume appends `--session <id>` — only pi-family CLIs support that) |
 | `WEB_PI_TMUX_SOCKET` | `web-pi` | the tmux socket the app owns |
 | `WEB_PI_TMUX_CONF` | `<app root>/tmux.conf` | tmux server config, applied when the tmux server starts (escape-time, scrollback, truecolour — see the file) |
-| `WEB_PI_DB_FILE` | `<app root>/webpi.db` | sqlite state db (0600): login credential + `sessions` overlay table (hidden flags — per-session metadata lands there later). Fresh setup: `npm run set-password` creates it |
+| `WEB_PI_DB_FILE` | `<state dir>/webpi.db` | sqlite state db (0600): login credential + `sessions` overlay table (hidden flags — per-session metadata lands there later). Fresh setup: `npm run set-password` creates it |
 | `WEB_PI_SYSTEMCTL` | `systemctl` | binary used for scheduled jobs (override for tests/odd distros) |
 | `WEB_PI_SYSTEMD_ANALYZE` | `systemd-analyze` | binary used to validate OnCalendar specs |
 | `WEB_PI_CLIENT_DIR` | `<app root>/dist/client` | Astro hashed assets |
@@ -203,7 +204,7 @@ installed on the box. Its config is project-controlled too:
 
 - [`pi/`](pi/) in the repo is the **template** — settings, `mcp.json`,
   skills, extensions; whatever the install should ship to every session.
-- The **runtime agent dir** (default `<app root>/.pi-agent`, gitignored) is
+- The **runtime agent dir** (default `<state dir>/pi-agent`) is
   seeded from it at server boot, **only where absent**: existing files always
   win, so settings pi itself writes and operator edits are never clobbered,
   while template files added by upgrades still land. State only pi writes
@@ -223,7 +224,7 @@ Container-first:
 
 ```sh
 docker compose build        # subpath deploy: WEB_PI_BASE=/console docker compose build
-docker compose up -d        # loopback :3000, app on the named volume webpi-app
+docker compose up -d        # loopback :3000, app on webpi-app, state on webpi-state (/state)
 ```
 
 Front it with TLS — [`deploy/`](deploy/) has:
@@ -233,6 +234,25 @@ Front it with TLS — [`deploy/`](deploy/) has:
   runs with `WEB_PI_TRUST_PROXY=1` (compose sets it; set it yourself for a
   host install behind nginx)
 - fail2ban filter + jail watching the nginx access log for failed logins
+
+State (`webpi.db`, `pi-agent/` — pi credentials + sessions) lives on its
+own `webpi-state` volume at `/state` (`WEB_PI_STATE_DIR`), outside the
+entrypoint-synced `/app` — image syncs can't touch it by construction.
+Installs from before the state directory existed (state in `/app` or the
+app root) move once by hand; there is deliberately no migration system:
+
+```sh
+# container: state sat on the webpi-app volume under /app
+docker compose down
+docker compose run --rm --entrypoint sh webpi -c \
+  'mkdir -p /state && mv /app/webpi.db /state/ && mv /app/.pi-agent /state/pi-agent'
+docker compose up -d
+```
+
+A host install is the same move against the default dir: `mkdir -p
+~/.local/state/web-pi && mv <app root>/webpi.db ~/.local/state/web-pi/ &&
+mv <app root>/.pi-agent ~/.local/state/web-pi/pi-agent`. A fresh deploy
+needs none of this — just re-run `npm run set-password`.
 
 The old systemd unit is gone: the container *is* the unit (restart policy
 + healthcheck in compose; `ProtectSystem`-style hardening is the container
@@ -265,9 +285,10 @@ lockfile on every boot, so an update made in place (button or `exec`) does
 not persist there.
 
 **App code:** rebuild + `up -d`. The entrypoint hashes the image's source
-tree; on change it syncs app files into the existing volume while volume
-state survives untouched (`webpi.db`, `.pi-agent/`, `apps/`, anything not
-in the image). Volumes never re-seed when content hasn't changed.
+tree; on change it syncs app files into the existing volume — anything not
+in the image (`apps/`, …) survives untouched. web-pi state isn't in `/app`
+at all any more (`webpi-state` volume, above), so a sync can't reach it.
+Volumes never re-seed when content hasn't changed.
 
 **Git-owned volume (self-modification, durable local edits):** the named
 volume is image-tracked — hand edits survive only until the next image
