@@ -2,14 +2,6 @@ apps folder that contains git submodules
 
 update pi button, auto-update setting
 
-privilege split: serving vs working (DESIGN_REVIEW 1.1) — before apps and self-modification are built on top:
-- compose default becomes two containers sharing a tmux socket dir: web (uid A / node — code from the image, immutable: drop the --chown on /opt/web-pi; owns web state: auth, hidden-sessions, jobs.json → sqlite later; serves HTTP/WS; only ATTACHES to tmux) + workspace (uid B — runs the tmux server and every pi session; project checkouts and pi state/pi-agent on volumes)
-- bookworm ships tmux 3.3a — meets the 3.3+ server-access bar for admitting uid A's clients to uid B's socket; verify it actually works for the uid pair
-- the state-dir TODO above partitions by owner at split time: web state rides with uid A, pi-agent (provider credentials + sessions) rides with uid B
-- wrinkle to design: web reads pi's session store for the sidebar/resume — sessions volume must be uid-A-readable (shared group) though uid B writes it; the scheduler TODO already fires onto the shared socket, unaffected
-- README documents the two-unix-user equivalent for host installs (web-pi + web-pi-work, shared group, server-access) — same guarantees without Docker
-- effect: a prompt injection in pi can no longer rewrite the server, replace auth.json, or plant persistence; self-modification becomes "pi edits a workspace checkout, the web-side apply step builds and swaps"
-
 management page (replaces the panic-endpoint idea) — rollback AND applying changes in one place:
 - the one unmodifiable part of the software: programmatic enforcement — the apply step rejects any patch that changes it from within the container; it can only be modified in the original project
 - whole page, designed after the split lands (its "protected from modification" property is exactly what the split makes enforceable); handles picking a git commit, rebuilding, swapping, basic feedback
