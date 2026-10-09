@@ -34,6 +34,4 @@ export const envSchema = {
   WEB_PI_NEW_SESSION_CWD: { type: 'string', context: 'server', access: 'secret', optional: true },
   WEB_PI_COMMAND: { type: 'string', context: 'server', access: 'secret', optional: true },
   WEB_PI_TMUX_CONF: { type: 'string', context: 'server', access: 'secret', optional: true },
-  WEB_PI_SYSTEMCTL: { type: 'string', context: 'server', access: 'secret', default: 'systemctl' },
-  WEB_PI_SYSTEMD_ANALYZE: { type: 'string', context: 'server', access: 'secret', default: 'systemd-analyze' },
 } as const satisfies Record<string, ServerEnvField>;
