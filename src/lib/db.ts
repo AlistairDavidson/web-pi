@@ -1,7 +1,7 @@
 // db.ts — web-pi's persisted state: one SQLite file (node:sqlite).
 //
 // Everything the app itself writes lives in ENV.WEB_PI_DB_FILE (default
-// <app root>/webpi.db): the login credential (single row) and a `sessions`
+// <state dir>/webpi.db): the login credential (single row) and a `sessions`
 // overlay table today; scheduled-job bookkeeping lands on it with the
 // in-process scheduler (TODO.md). pi's own store (sessions/, provider
 // creds under WEB_PI_AGENT_DIR) and the systemd job units are not web-pi

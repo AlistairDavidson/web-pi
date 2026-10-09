@@ -25,6 +25,9 @@ export const envSchema = {
   WEB_PI_TRUST_PROXY: { type: 'number', context: 'server', access: 'secret', default: 0 },
   // Dynamic defaults — see env.ts (homedir / app root / fs probe / cross-var).
   WEB_PI_HOME: { type: 'string', context: 'server', access: 'secret', optional: true },
+  // One directory for all web-pi state (db, runtime pi agent dir) —
+  // dynamic default in env.ts ($WEB_PI_HOME/.local/state/web-pi).
+  WEB_PI_STATE_DIR: { type: 'string', context: 'server', access: 'secret', optional: true },
   WEB_PI_AGENT_DIR: { type: 'string', context: 'server', access: 'secret', optional: true },
   // sqlite state db (credential + hidden sessions) — dynamic default in env.ts.
   WEB_PI_DB_FILE: { type: 'string', context: 'server', access: 'secret', optional: true },
