@@ -1,9 +1,10 @@
 ---
 import Base from '../layouts/Base.astro';
-// Read-only settings dashboard: effective config from /api/settings (the
-// server computes; this page renders) + the one action, update pi
-// (POST /api/update-pi). Frontmatter imports SSR the wa-* components in
-// the markup; the <script> below re-imports them client-side so they
+// Settings dashboard: effective config from /api/settings (the server
+// computes; this page renders) plus the pi actions — the manual update
+// button (POST /api/update-pi) and the auto-update toggle + status lines
+// (POST /api/auto-update-pi). Frontmatter imports SSR the wa-* components
+// in the markup; the <script> below re-imports them client-side so they
 // upgrade (AGENTS.md: SSR imports ≠ client imports).
 import '@awesome.me/webawesome/dist/components/card/card.js';
 import '@awesome.me/webawesome/dist/components/button/button.js';
@@ -11,6 +12,7 @@ import '@awesome.me/webawesome/dist/components/icon/icon.js';
 import '@awesome.me/webawesome/dist/components/callout/callout.js';
 import '@awesome.me/webawesome/dist/components/badge/badge.js';
 import '@awesome.me/webawesome/dist/components/details/details.js';
+import '@awesome.me/webawesome/dist/components/switch/switch.js';
 
 // Matches the server's WEB_PI_BASE ('' for root, else '/foo').
 const base = (import.meta.env.BASE_URL ?? '/').replace(/\/+$/, '');
@@ -51,6 +53,19 @@ const base = (import.meta.env.BASE_URL ?? '/').replace(/\/+$/, '');
             update pi
           </wa-button>
         </div>
+        <div class="wa-split">
+          <div class="wa-stack wa-gap-3xs">
+            <span class="hint">checks daily and installs the newest pi <em>within the declared range</em> —
+              never a restart; running sessions keep their version</span>
+            <span class="hint" id="auto-check-line">…</span>
+            <span class="hint" id="auto-update-line">…</span>
+          </div>
+          <wa-switch id="pi-auto-update">auto-update</wa-switch>
+        </div>
+        <wa-callout id="auto-result" class="hidden"></wa-callout>
+        <wa-details id="auto-update-output" summary="last auto-update npm output" class="hidden">
+          <pre class="npm-output"></pre>
+        </wa-details>
         <p class="hint hidden" id="npm-missing">
           npm was not found on the server's PATH — updating from here needs npm in the server's environment.
         </p>
@@ -59,10 +74,12 @@ const base = (import.meta.env.BASE_URL ?? '/').replace(/\/+$/, '');
           <pre class="npm-output"></pre>
         </wa-details>
         <p class="hint">
-          New sessions use the updated pi straight away; running sessions keep the
-          version they started with. In the Docker dev profile node_modules is a shadow
-          volume — an update from here may not survive the next container boot
-          (README → Updating).
+          The manual button installs <code>@latest</code> (stay within the declared
+          <code>^1</code> range — the app's session code is written against that major);
+          auto-update always stays inside it. New sessions use the updated pi
+          straight away; running sessions keep the version they started with. In the
+          Docker dev profile node_modules is a shadow volume — updates from here may
+          not survive the next container boot (README → Updating).
         </p>
       </div>
     </wa-card>
@@ -103,6 +120,7 @@ const base = (import.meta.env.BASE_URL ?? '/').replace(/\/+$/, '');
   import '@awesome.me/webawesome/dist/components/callout/callout.js';
   import '@awesome.me/webawesome/dist/components/badge/badge.js';
   import '@awesome.me/webawesome/dist/components/details/details.js';
+  import '@awesome.me/webawesome/dist/components/switch/switch.js';
 
   import type { SettingsState, UpdateResult } from '../lib/types';
   import { BASE } from '../base';
@@ -115,6 +133,7 @@ const base = (import.meta.env.BASE_URL ?? '/').replace(/\/+$/, '');
   interface WaButtonLike extends HTMLElement { loading: boolean; disabled: boolean }
   interface WaCalloutLike extends HTMLElement { variant: string }
   interface WaDetailsLike extends HTMLElement { open: boolean }
+  interface WaSwitchLike extends HTMLElement { checked: boolean; disabled: boolean }
   const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
   const config = $('config');
   const badge = $('pi-badge');
@@ -123,10 +142,34 @@ const base = (import.meta.env.BASE_URL ?? '/').replace(/\/+$/, '');
   const result = $<WaCalloutLike>('update-result');
   const outputWrap = $<WaDetailsLike>('update-output');
   const output = outputWrap.querySelector('pre')!;
+  const autoSwitch = $<WaSwitchLike>('pi-auto-update');
+  const autoCheckLine = $('auto-check-line');
+  const autoUpdateLine = $('auto-update-line');
+  const autoResult = $<WaCalloutLike>('auto-result');
+  const autoOutputWrap = $<WaDetailsLike>('auto-update-output');
+  const autoOutput = autoOutputWrap.querySelector('pre')!;
   const logoutAllBtn = $<WaButtonLike>('logout-all');
   const logoutResult = $<WaCalloutLike>('logout-result');
 
   let npmAvailable = true;
+
+  const fmtWhen = (at: number): string => new Date(at).toLocaleString();
+
+  function renderAutoStatus(au: SettingsState['piAutoUpdate']): void {
+    autoCheckLine.textContent = au.lastCheck
+      ? `last check ${fmtWhen(au.lastCheck.at)} — ${au.lastCheck.detail}`
+      : 'not checked yet';
+    autoUpdateLine.textContent = au.lastUpdate
+      ? `last update ${fmtWhen(au.lastUpdate.at)} — ${au.lastUpdate.detail}`
+      : 'no auto-update has run yet';
+    if (au.lastUpdate?.output) {
+      autoOutput.textContent = au.lastUpdate.output;
+      autoOutputWrap.open = true;
+      autoOutputWrap.classList.remove('hidden');
+    } else {
+      autoOutputWrap.classList.add('hidden');
+    }
+  }
 
   async function loadSettings(): Promise<void> {
     let r: Response;
@@ -156,8 +199,11 @@ const base = (import.meta.env.BASE_URL ?? '/').replace(/\/+$/, '');
     badge.textContent = `pi ${s.piInstalled ?? 'not installed'}`;
     declared.textContent = `declared ${s.piDeclared} (${s.piPackage})`;
     npmAvailable = s.npmAvailable;
+    autoSwitch.checked = s.piAutoUpdate.enabled;
+    renderAutoStatus(s.piAutoUpdate);
     if (!npmAvailable) {
       updateBtn.disabled = true;
+      autoSwitch.disabled = true; // checks need npm too; the hint below says so
       $('npm-missing').classList.remove('hidden');
     }
   }
@@ -194,6 +240,32 @@ const base = (import.meta.env.BASE_URL ?? '/').replace(/\/+$/, '');
     } finally {
       updateBtn.loading = false;
       updateBtn.disabled = !npmAvailable;
+    }
+  });
+
+  // The auto-update toggle applies immediately (no form): persist via the
+  // API, revert the switch when the save fails. The status lines come from
+  // /api/settings on load; the first check runs within a minute of turning
+  // the setting on, so they stay 'not checked yet' until then.
+  autoSwitch.addEventListener('change', async () => {
+    const enabled = autoSwitch.checked;
+    autoSwitch.disabled = true;
+    autoResult.classList.add('hidden');
+    try {
+      const res = await fetch(`${BASE}/api/auto-update-pi`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      if (res.status === 401) { location.href = `${BASE}/login`; return; }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (enabled) autoCheckLine.textContent = 'not checked yet — first check within a minute';
+    } catch (e) {
+      autoSwitch.checked = !enabled; // the save failed — restore what's persisted
+      autoResult.variant = 'danger';
+      autoResult.textContent = `could not save the setting: ${(e as Error).message}`;
+      autoResult.classList.remove('hidden');
+    } finally {
+      autoSwitch.disabled = false;
     }
   });
 

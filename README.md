@@ -46,8 +46,9 @@ containers and two uids (server vs tmux/pi) — see
   run — scheduler-fired or "run now" — opens in a tmux session on the app's
   socket, so it shows up in Live and is attachable like any session.
 - **Settings** — `/settings`: read-only dashboard of the effective config
-  (listen address, paths, versions) plus one action, a manual update-pi
-  button.
+  (listen address, paths, versions) plus the pi update actions — a manual
+  update-pi button and an opt-in daily auto-update that stays within the
+  declared range.
 - **Single-user login** — username + password, salted scrypt hash in the
   sqlite state db (`webpi.db`), `HttpOnly`/`Secure`/`SameSite=Strict`
   session cookie. No account machinery. Fails closed until the credential
@@ -157,7 +158,7 @@ directly.
 | `WEB_PI_COMMAND` | `<app root>/node_modules/.bin/pi` (falls back to `pi` on PATH) | command run in a new session (whitespace-split; resume appends `--session <id>` — only pi-family CLIs support that) |
 | `WEB_PI_TMUX_SOCKET` | `web-pi` | the tmux socket the app uses. A relative *name* is the single-user shape: the app's own server, forked on the first new-session, under the per-uid default dir. An **absolute path** switches on the privilege split ([below](#the-privilege-split-two-containers)): tmux runs as another uid/container on that shared socket (`-S` instead of `-L` — a relative name resolves per-uid and cannot be shared), and new/resume sessions refuse to fork a server, erroring with "workspace tmux server not running" instead. The server lifecycle is then the workspace side's job (`docker-workspace-entrypoint.sh`, or the host-install equivalent below) |
 | `WEB_PI_TMUX_CONF` | `<app root>/tmux.conf` | tmux server config, applied when the tmux server starts (escape-time, scrollback, truecolour — see the file) |
-| `WEB_PI_DB_FILE` | `<state dir>/webpi.db` | sqlite state db (0600): login credential, `sessions` overlay table (hidden flags), scheduled-job tables (`jobs`, `job_runs` — the in-process scheduler). Fresh setup: `npm run set-password` creates it |
+| `WEB_PI_DB_FILE` | `<state dir>/webpi.db` | sqlite state db (0600): login credential, `sessions` overlay table (hidden flags), scheduled-job tables (`jobs`, `job_runs` — the in-process scheduler), `settings` kv (the pi auto-update toggle + outcomes). Fresh setup: `npm run set-password` creates it |
 | `WEB_PI_CLIENT_DIR` | `<app root>/dist/client` | Astro hashed assets |
 | `WEB_PI_ASTRO_ENTRY` | `<app root>/dist/server/entry.mjs` | Astro SSR handler |
 | `WEB_PI_DEV_API` | `http://127.0.0.1:3001` | dev only: where `astro dev` proxies `/api`, `/ws`, login/logout (the `npm run dev:server` process) |
@@ -503,6 +504,35 @@ are `/` and `/login`.
 
 Stay within the `^1` range web-pi declares (its session-listing and resume
 code is written against that major).
+
+**Auto-update** (`/settings`, default off): a `wa-switch` next to the
+manual button turns on a daily check — the server checks about a minute
+after boot (or after you flip the switch) and then every 24 h while it
+runs. Unlike the manual button's `@latest`, auto-update always targets the
+**newest version within the range web-pi declares** in its `package.json`
+(e.g. `npm install @earendil-works/pi-coding-agent@^1.0.1` — the range is
+derived from the declaration, never hardcoded), so it can never carry you
+outside that major; a pi you installed by hand *above* the range is left
+alone (latest-in-range < installed means no update — it never downgrades
+back into range). Installs go through the same machinery as the button
+(shared one-at-a-time guard, captured output, no restart), always in the
+install dir the server runs from. `/settings` shows the last check and
+last update outcomes; if the declared range can't drive auto-update or npm
+is missing from the server's PATH, the check says so instead of installing
+anything.
+
+Which install dir that is depends on the shape. In the **single-user
+shapes** (host install, npm global) it is the install dir sessions run pi
+from, and auto-update moves them as described above. In the **split
+containers** (the compose default) the server runs from the web
+container's `/opt/web-pi` — not the workspace side the sessions run pi
+from — so an auto-update there only moves the copy `/settings` reports,
+and it survives only until the next image deploy; use the image or
+standalone-workspace flows above to change what sessions actually run.
+Sending the auto-update install to the workspace side is a marked junction
+in `src/lib/auto-update.ts` for a later pass. In the **docker dev
+profile** `node_modules` is a shadow volume and `npm install` re-runs
+from the lockfile on every boot, so nothing auto-updated persists there.
 
 **App code:** rebuild + `up -d` — the web container serves the image's
 `/opt/web-pi` copy, so an image rebuild IS the deploy; nothing syncs a

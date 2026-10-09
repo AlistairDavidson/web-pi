@@ -619,6 +619,7 @@ test('unauthenticated /settings serves the login page; settings APIs stay guarde
   await expect(page.locator('wa-input#username input')).toHaveCount(1);
   expect((await request.get('/api/settings')).status()).toBe(401);
   expect((await request.post('/api/update-pi', { data: {} })).status()).toBe(401);
+  expect((await request.post('/api/auto-update-pi', { data: { enabled: true } })).status()).toBe(401);
 });
 
 test('settings dashboard shows effective config; update dry-run is check-only', async ({ page }) => {
@@ -1141,6 +1142,62 @@ test('SIGTERM: every socket gets restart, closes, and the process exits 0', asyn
     catch { /* no server was started — fine */ }
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('auto-update setting: default OFF, toggle persists across reload, status lines render', async ({ page }) => {
+  // Runs after the SIGTERM test and before the rate-limit test (last).
+  // The e2e server must never actually run npm through the scheduler: the
+  // first check is 1 min after the setting turns ON (FIRST_CHECK_DELAY_MS,
+  // src/lib/auto-update.ts), and this test ends by toggling the setting
+  // back OFF — which cancels even that — so the shared webServer finishes
+  // with nothing armed.
+  await login(page);
+  await page.goto('/settings');
+
+  // The switch upgraded client-side (SSR ≠ client imports — AGENTS.md).
+  await page.waitForFunction(() =>
+    typeof (document.querySelector('wa-switch#pi-auto-update') as unknown as
+      { checked?: boolean })?.checked === 'boolean');
+  const isChecked = (): Promise<boolean> =>
+    page.evaluate(() => (document.querySelector('wa-switch#pi-auto-update') as unknown as
+      { checked: boolean }).checked);
+  const control = page.locator('wa-switch#pi-auto-update [part="control"]');
+
+  // Fresh db (global-setup recreated the workspace): default OFF, both in
+  // the UI and on the API, with the never-checked status lines rendered.
+  expect(await isChecked()).toBe(false);
+  await expect(page.locator('#auto-check-line')).toContainText('not checked yet');
+  await expect(page.locator('#auto-update-line')).toContainText('no auto-update has run yet');
+  expect((await api(page, 'GET', '/api/settings')).json.piAutoUpdate).toMatchObject({ enabled: false });
+
+  // Toggle ON through the real control.
+  await control.click();
+  await expect.poll(async () =>
+    (await api(page, 'GET', '/api/settings')).json.piAutoUpdate.enabled).toBe(true);
+  const db = new DatabaseSync(`${WORKSPACE}/webpi.db`);
+  const setting = () => (db.prepare(
+    "SELECT value FROM settings WHERE key = 'piAutoUpdate.enabled'").get() as
+    { value: string }).value;
+  expect(setting()).toBe('1');
+
+  // Persisted across a reload: the switch renders ON from /api/settings.
+  await page.reload();
+  await page.waitForFunction(() =>
+    (document.querySelector('wa-switch#pi-auto-update') as unknown as
+      { checked?: boolean })?.checked === true);
+  await expect(page.locator('#auto-check-line')).toContainText('not checked yet');
+
+  // The API validates its (deliberately trivial) body.
+  expect((await api(page, 'POST', '/api/auto-update-pi', { enabled: 'yes' })).status).toBe(400);
+  expect((await api(page, 'POST', '/api/auto-update-pi', {})).status).toBe(400);
+
+  // Toggle back OFF — clean state, nothing scheduled for the rest of
+  // the suite.
+  await control.click();
+  await expect.poll(async () =>
+    (await api(page, 'GET', '/api/settings')).json.piAutoUpdate.enabled).toBe(false);
+  expect(setting()).toBe('0');
+  db.close();
 });
 
 test('login rate limit kicks in (10 per 15 min per IP) and ignores a spoofed X-Forwarded-For', async ({ request }) => {

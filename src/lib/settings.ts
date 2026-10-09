@@ -61,10 +61,13 @@ let updateBusy = false;
 
 export const BUSY_ERROR = 'an update is already running';
 
-/** Run (or dry-run) the manual pi update. Never throws; reports via cb. */
+/** Run (or dry-run) a pi update. Never throws; reports via cb. The
+ *  install spec defaults to @latest (the manual button); the auto-updater
+ *  passes the declared-range spec instead — same machinery, same busy
+ *  guard, same output capture. */
 export function runPiUpdate(appRoot: string, dryRun: boolean,
-  cb: (r: UpdateResult) => void): void {
-  const args = ['install', `${PI_PACKAGE}@latest`];
+  cb: (r: UpdateResult) => void, spec: string = `${PI_PACKAGE}@latest`): void {
+  const args = ['install', spec];
   const command = `npm ${args.join(' ')}`;
   const before = piInstalled(appRoot);
   const reply = (ok: boolean, extra: Partial<UpdateResult>): void =>
@@ -96,6 +99,10 @@ export function runPiUpdate(appRoot: string, dryRun: boolean,
   }
 
   updateBusy = true;
+  // FLEET JUNCTION (task/privilege-split): the two-container shape moves
+  // this npm install (node_modules with it) to the workspace side; the
+  // delegate site is marked in src/lib/auto-update.ts, next to the
+  // auto-update call into this function.
   console.log(`pi update: running \`${command}\` in ${appRoot}`);
   execFile(npm, args, { cwd: appRoot, timeout: UPDATE_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 },
     (err, stdout, stderr) => {

@@ -77,6 +77,34 @@ export interface CalendarCheck {
 }
 
 // ---- settings dashboard (/settings ← /api/settings; /api/update-pi) ----
+/** Outcome of the most recent pi auto-update CHECK (persisted in the state
+ *  db; src/lib/auto-update.ts). The check runs daily while the setting is
+ *  ON — see SettingsState.piAutoUpdate. */
+export interface AutoUpdateCheck {
+  /** epoch ms of the check */
+  at: number;
+  /** 'up-to-date': nothing to do — the newest in range is installed, the
+   *  installed pi sits ABOVE the range (manual @latest), or its version
+   *  doesn't compare; 'installed': a newer pi within the declared range
+   *  was installed by this check; 'failed': the check or the install
+   *  failed — in every ambiguous case `detail` says which */
+  outcome: 'up-to-date' | 'installed' | 'failed';
+  /** human-readable summary for the settings page status line */
+  detail: string;
+}
+
+/** Outcome of the most recent pi auto-update INSTALL (a successful check
+ *  that found nothing to do leaves the previous entry alone). */
+export interface AutoUpdateResult {
+  at: number;
+  ok: boolean;
+  before: string | null;
+  after: string | null;
+  detail: string;
+  /** capped npm output tail, shown on /settings */
+  output: string;
+}
+
 // Effective (resolved, defaults applied) config for the read-only dashboard.
 // Paths only — never credential or hash contents.
 export interface SettingsState {
@@ -98,6 +126,12 @@ export interface SettingsState {
   piDeclared: string;
   piInstalled: string | null;
   npmAvailable: boolean;
+  /** the pi auto-update setting (toggle + status lines on /settings) */
+  piAutoUpdate: {
+    enabled: boolean;
+    lastCheck: AutoUpdateCheck | null;
+    lastUpdate: AutoUpdateResult | null;
+  };
 }
 
 /** Result of POST /api/update-pi (manual `npm install pi@latest`). */

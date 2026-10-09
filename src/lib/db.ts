@@ -2,8 +2,9 @@
 //
 // Everything the app itself writes lives in ENV.WEB_PI_DB_FILE (default
 // <state dir>/webpi.db): the login credential (single row), a `sessions`
-// overlay table, and the scheduled-jobs tables (`jobs` definitions,
-// `job_runs` bookkeeping — src/lib/jobs.ts). pi's own store (sessions/,
+// overlay table, the scheduled-jobs tables (`jobs` definitions,
+// `job_runs` bookkeeping — src/lib/jobs.ts), and a small `settings` kv
+// (src/lib/auto-update.ts). pi's own store (sessions/,
 // provider creds under WEB_PI_AGENT_DIR) is not web-pi state and stays
 // untouched.
 //
@@ -60,6 +61,12 @@ const SCHEMA = `
     origin   TEXT    NOT NULL        -- 'schedule' | 'catchup' | 'manual'
   );
   CREATE INDEX IF NOT EXISTS job_runs_job ON job_runs (job, fired_at);
+  -- Small app-settings kv (one row per key, JSON-encoded values). Keys
+  -- are owned by their module (today: pi auto-update, src/lib/auto-update.ts).
+  CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
 `;
 
 /** web-pi's state database: a lazily-opened node:sqlite connection (see
@@ -81,12 +88,12 @@ export class StateDb {
       // the db open — let sqlite wait out the lock instead of failing.
       db.exec('PRAGMA busy_timeout = 3000');
       db.exec(SCHEMA);
-      // user_version: 1 = credential + sessions; 2 adds the job tables
-      // (additive — the CREATE IF NOT EXISTS block above brings any older
-      // db up to v2 shape; nothing is ever dropped).
+      // user_version: 1 = credential + sessions; 2 adds the job tables;
+      // 3 adds the settings kv table (additive — the CREATE IF NOT EXISTS
+      // block above brings any older db up to v3 shape; nothing is dropped).
       const v = db.prepare('PRAGMA user_version').get() as { user_version: number };
-      if (v.user_version < 2) db.exec('PRAGMA user_version = 2');
-      else if (v.user_version > 2) {
+      if (v.user_version < 3) db.exec('PRAGMA user_version = 3');
+      else if (v.user_version > 3) {
         throw new Error(`state db ${this.file} is schema v${v.user_version} — newer than this build understands`);
       }
       if (fresh) fs.chmodSync(this.file, 0o600); // it holds the password hash
@@ -103,5 +110,19 @@ export class StateDb {
     let s = this.stmts.get(sql);
     if (!s) { s = this.db().prepare(sql); this.stmts.set(sql, s); }
     return s;
+  }
+
+  /** Read one app-settings value (settings kv table); null when unset. */
+  getSetting(key: string): string | null {
+    const row = this.stmt('SELECT value FROM settings WHERE key = ?').get(key) as
+      { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  /** Write one app-settings value. Throws on db failure — callers decide
+   *  how failure reaches the user (the API 500s instead of lying). */
+  setSetting(key: string, value: string): void {
+    this.stmt('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value')
+      .run(key, value);
   }
 }

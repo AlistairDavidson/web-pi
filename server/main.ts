@@ -20,6 +20,9 @@ import * as tmux from '../src/lib/tmux';
 import { ENV, RAW_ENV, APP_ROOT, PI_BIN, PI_AGENT_DIR, PI_SESSION_DIR } from '../src/lib/env';
 import * as jobs from '../src/lib/jobs';
 import {
+  autoUpdateEnabled, lastCheck, lastUpdate, AutoUpdater,
+} from '../src/lib/auto-update';
+import {
   BUSY_ERROR, PI_PACKAGE, appVersion, npmPath, piDeclared, piInstalled, runPiUpdate,
 } from '../src/lib/settings';
 import type { ClientMsg, ServerMsg, ConsoleState, SettingsState } from '../src/lib/types';
@@ -127,6 +130,14 @@ const hiddenSessions = new HiddenSessions(stateDb);
 // socket under the same job-session conventions as interactive sessions.
 const scheduler = new jobs.Scheduler(stateDb, { cwd: CFG.newSessionCwd, env: sessionEnv });
 scheduler.start();
+// pi auto-update (src/lib/auto-update.ts): when the persisted setting is
+// ON, one check shortly after boot and then daily — always within the
+// declared range, never a restart. start() only arms the deferred boot
+// probe: it reads the setting lazily (the state db opens lazily — see
+// db.ts — so nothing db-shaped happens eagerly at boot; with the default
+// OFF nothing npm-shaped is ever scheduled).
+const autoUpdater = new AutoUpdater({ db: stateDb, appRoot: APP_ROOT });
+autoUpdater.start();
 // The scheduler's single shutdown hook. The SIGTERM/SIGINT handler is a
 // sibling task (task/session-lifecycle, merged separately); at merge time
 // it calls shutdownScheduler() — wired here so teardown has exactly one
@@ -584,6 +595,11 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
       piDeclared: piDeclared(APP_ROOT),
       piInstalled: piInstalled(APP_ROOT),
       npmAvailable: npmPath() !== null,
+      piAutoUpdate: {
+        enabled: autoUpdateEnabled(stateDb),
+        lastCheck: lastCheck(stateDb),
+        lastUpdate: lastUpdate(stateDb),
+      },
     };
     sendJSON(res, 200, state);
     return;
@@ -598,6 +614,24 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
       runPiUpdate(APP_ROOT, body?.dryRun === true, r => {
         sendJSON(res, r.ok ? 200 : (r.error === BUSY_ERROR ? 409 : 500), r);
       });
+    });
+    return;
+  }
+
+  // The auto-update toggle (/settings): persist the setting and rewire the
+  // periodic check (src/lib/auto-update.ts). Body parsing is deliberately
+  // trivial — one boolean field, nothing else read — so it stays obvious
+  // what a validation layer must accept.
+  // FLEET JUNCTION (task/zod-validation): adopt this body into the shared
+  // validation pattern when it lands; the handler's read is the two lines
+  // below the readBody callback.
+  if (req.method === 'POST' && url === route('/api/auto-update-pi')) {
+    readBody(req, (err, body) => {
+      if (err) { send(res, 400, 'bad request'); return; }
+      if (typeof body?.enabled !== 'boolean') { send(res, 400, 'enabled must be a boolean'); return; }
+      try { autoUpdater.setEnabled(body.enabled); }
+      catch (err2) { sendJSON(res, 500, { error: `could not save the setting: ${(err2 as Error).message}` }); return; }
+      sendJSON(res, 200, { ok: true, enabled: body.enabled });
     });
     return;
   }
@@ -862,6 +896,7 @@ const SHUTDOWN_DEADLINE_MS = 5000;
 const whenClosed = new Promise<void>(resolve => server.once('close', resolve));
 const shutdownSteps: Array<() => void | Promise<void>> = [
   () => { shutdownScheduler(); },                    // 0. stop firing scheduled jobs
+  () => { autoUpdater.stop(); },                    // 0.5 stop the auto-update loop
   () => { server.close(); },                        // 1. stop listening
   () => { closeAllSockets({ type: 'restart' }); },  // 2. notify + close every client
   () => {
