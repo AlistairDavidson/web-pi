@@ -301,16 +301,19 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
   }
 
   if (req.method === 'GET' && url === route('/api/state')) {
-    const sessList = listSessions(CFG.sessionsDir);
-    tmux.listSessions((err, live) => {
-      const state: ConsoleState = {
-        me: 'ok', configured: auth.configured(),
-        live: err ? [] : live,
-        sessions: sessList.map(s => ({ ...s, hidden: hiddenSessions.has(s.id) })),
-        hiddenCount: hiddenSessions.size,
-      };
-      sendJSON(res, 200, state);
-    });
+    // Async scan + title cache: the poll must never hold the event loop —
+    // terminal WS traffic keeps flowing while it runs.
+    listSessions(CFG.sessionsDir).then(sessList => {
+      tmux.listSessions((err, live) => {
+        const state: ConsoleState = {
+          me: 'ok', configured: auth.configured(),
+          live: err ? [] : live,
+          sessions: sessList.map(s => ({ ...s, hidden: hiddenSessions.has(s.id) })),
+          hiddenCount: hiddenSessions.size,
+        };
+        sendJSON(res, 200, state);
+      });
+    }, () => send(res, 500, 'internal error')); // unreachable: the scan tolerates junk
     return;
   }
 
