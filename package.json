@@ -12,8 +12,20 @@
     "build": "astro build && tsc -p tsconfig.server.json",
     "start": "node dist-server/server/main.js",
     "set-password": "node dist-server/server/set-password.js",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "prepack": "npm run build && node tools/prepack.mjs",
+    "prepublishOnly": "npm run build"
   },
+  "bin": {
+    "web-pi": "dist-server/server/main.js",
+    "webpi-set-password": "dist-server/server/set-password.js"
+  },
+  "files": [
+    "dist/",
+    "dist-server/",
+    "pi/",
+    "tmux.conf"
+  ],
   "dependencies": {
     "@astrojs/node": "^11.1.6",
     "@awesome.me/astro-lit": "^5.0.4",

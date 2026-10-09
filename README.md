@@ -226,6 +226,20 @@ docker compose build        # subpath deploy: WEB_PI_BASE=/console docker compos
 docker compose up -d        # loopback :3000, app on the named volume webpi-app
 ```
 
+Or skip Docker: the npm package is a deploy channel too —
+
+```sh
+npm i -g web-pi
+webpi-set-password              # interactive; creates webpi.db
+web-pi                          # serves on http://127.0.0.1:3000
+```
+
+— same `WEB_PI_*` env contract, loopback bind by default, behind the same
+reverse proxy (below). State that defaults to the app root (`webpi.db`,
+`.pi-agent/`) lands inside the installed package dir; point
+`WEB_PI_DB_FILE`/`WEB_PI_AGENT_DIR` elsewhere to keep it out. Requirements
+as above: Node ≥ 22.13, a C++ toolchain to build `node-pty`, `tmux` on PATH.
+
 Front it with TLS — [`deploy/`](deploy/) has:
 
 - `nginx-webpi.conf` — TLS reverse proxy with the WebSocket upgrade map

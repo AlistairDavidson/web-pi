@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // set-password.ts — set/replace the single login credential.
 // Interactive:
 //   npm run set-password   (or: node dist-server/server/set-password.js)
