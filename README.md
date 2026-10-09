@@ -318,12 +318,16 @@ sudo -u web-pi-work sh -c 'umask 0007; \
 ```
 
 (/run is wiped on boot — repeat the server bring-up from your boot
-scripts, or put the socket on persistent storage.) And run the server
-itself, as your user, with the split env — `WEB_PI_TMUX_SOCKET=/run/web-pi/tmux`,
-a sessions cwd and `WEB_PI_AGENT_DIR` that exist and are writable for
-`web-pi-work`, and `WEB_PI_HOME` pointing at a home that user can write.
-The server then attaches and creates sessions on `web-pi-work`'s server
-as a cross-uid client, exactly like the web container does.
+scripts, or put the socket on persistent storage. Nothing seeds the
+pi-agent template in this shape — the single-user server-boot seeding is
+off with an absolute socket — so copy the repo's `pi/` into the runtime
+agent dir yourself, as `web-pi-work`, if you want the shipped defaults.)
+And run the server itself, as your user, with the split env —
+`WEB_PI_TMUX_SOCKET=/run/web-pi/tmux`, a sessions cwd and
+`WEB_PI_AGENT_DIR` that exist and are writable for `web-pi-work`, and
+`WEB_PI_HOME` pointing at a home that user can write. The server then
+attaches and creates sessions on `web-pi-work`'s server as a cross-uid
+client, exactly like the web container does.
 
 Boxes that shouldn't build can pull instead: tags `v*` publish the prod
 image to `ghcr.io/<owner>/web-pi` (the version + `latest`):
@@ -466,16 +470,22 @@ are `/` and `/login`.
   compose build && docker compose up -d`. The workspace container picks
   the new binary up on the next `up` (pi is exec'd per session; running
   sessions finish on the old one). Durable in-place updates without a
-  rebuild: keep a checkout on the workspace volume and point
-  `WEB_PI_COMMAND` at its `node_modules/.bin/pi` — `docker compose exec
-  workspace sh -c 'cd /workspace/web-pi && npm install
-  @earendil-works/pi-coding-agent@latest'` then updates just the copy
-  sessions run (the web-side code stays image-pinned — that separation is
-  the split's point). `/settings` in this shape reports the image's
-  vendored version; drift there means the workspace copy moved ahead.
+  rebuild: install pi standalone on the workspace volume and point
+  `WEB_PI_COMMAND` at it — pi's own dependency tree is pure JS (verified:
+  installs and runs with no compiler on PATH), unlike a full web-pi
+  checkout whose `npm install` would build `node-pty`:
+
+  ```sh
+  docker compose exec workspace sh -c 'mkdir -p /workspace/pi && cd /workspace/pi && npm init -y >/dev/null && npm install @earendil-works/pi-coding-agent@latest'
+  # compose webpi environment: WEB_PI_COMMAND=/workspace/pi/node_modules/.bin/pi
+  docker compose up -d
+  ```
+
+  `/settings` in this shape reports the image's vendored version; drift
+  there means the workspace copy moved ahead.
   <!-- JUNCTION task/pi-auto-update: an auto-update setting on /settings
        lands here — in the split shape the update TARGET is the
-       workspace-side pi (image flow or WEB_PI_COMMAND checkout, above),
+       workspace-side pi (image flow or the standalone install above),
        not the web container's read-only /opt/web-pi; in single-user
        shapes it stays the in-place npm install described below. -->
 - **Single-user shapes (host install, npm global, the dev profile):**
@@ -502,21 +512,16 @@ image copy is root-owned by design — pi sessions can't edit it, they edit
 a checkout in the workspace instead. That is the self-modification story:
 pi edits `/workspace/<checkout>`, and a future web-side apply step (the
 management-page TODO) builds and swaps what web serves. To work that way
-today, put a checkout on the workspace volume and point
-`WEB_PI_COMMAND` at its vendored pi:
+today, keep a checkout on the workspace volume (building it is a dev-image
+or host concern — the slim workspace container has no compiler):
 
 ```sh
 docker compose exec workspace git clone <your-fork> /workspace/web-pi
-# compose webpi environment: WEB_PI_COMMAND=/workspace/web-pi/node_modules/.bin/pi
-docker compose exec workspace sh -c 'cd /workspace/web-pi && npm install @earendil-works/pi-coding-agent@latest && node_modules/.bin/pi --version'
-docker compose up -d
 ```
 
-(The install targets pi only — it is toolchain-free, unlike a bare
-`npm install` which would compile `node-pty` and need the dev image.)
-Updates to that checkout are `git pull` + the same install inside the
-workspace container — which is also the workflow pi sessions use when
-they modify the app (the management-page TODO builds on this).
+Sessions keep running the image's vendored pi (or the standalone install
+above — point `WEB_PI_COMMAND` at either); the checkout is the tree pi
+edits and the future apply step builds from.
 
 ## Security model
 

@@ -90,8 +90,10 @@ services:
     volumes:
       - webpi-state:/state
       # Read access to pi's session store (sidebar/resume); web never
-      # writes here — hidden flags live in its own db on /state.
-      - webpi-workspace:/workspace
+      # writes here — hidden flags live in its own db on /state. :ro makes
+      # that a container-level fact, not just a convention (the session
+      # cwd /workspace only needs to exist, which :ro preserves).
+      - webpi-workspace:/workspace:ro
       - webpi-tmux:/run/web-pi
     restart: unless-stopped
 
