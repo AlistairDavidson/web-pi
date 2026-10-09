@@ -14,6 +14,7 @@ import * as pty from 'node-pty';
 import { Auth, RateLimiter, type Auth as AuthType } from '../src/lib/auth';
 import { listSessions, findSession } from '../src/lib/sessions';
 import { HiddenSessions, SESSION_ID_RE } from '../src/lib/hidden-sessions';
+import { StateDb } from '../src/lib/db';
 import * as tmux from '../src/lib/tmux';
 import { ENV, RAW_ENV, APP_ROOT, PI_BIN, PI_AGENT_DIR, PI_SESSION_DIR } from '../src/lib/env';
 import * as jobs from '../src/lib/jobs';
@@ -53,7 +54,7 @@ const CFG = {
   base: normalizeBase(ENV.WEB_PI_BASE),
   home,
   agentDir,
-  authFile: ENV.WEB_PI_AUTH_FILE,
+  dbFile: ENV.WEB_PI_DB_FILE,
   clientDir: ENV.WEB_PI_CLIENT_DIR,
   astroEntry: ENV.WEB_PI_ASTRO_ENTRY,
   sessionsDir: ENV.WEB_PI_SESSIONS_DIR,
@@ -105,10 +106,12 @@ if (PI_SESSION_DIR) {
 /** Route path under the configured base ('/login' → '/foo/login'). */
 const route = (p: string): string => (CFG.base === '/' ? p : CFG.base + p);
 
-const auth: AuthType = new Auth(CFG.authFile);
-// Hide-from-list state for past sessions; ids in a JSON file next to the
-// auth file (WEB_PI_HIDDEN_FILE to move). pi's session store is untouched.
-const hiddenSessions = new HiddenSessions(ENV.WEB_PI_HIDDEN_FILE);
+// web-pi's own persisted state: one sqlite db (login credential,
+// hidden-session ids) at CFG.dbFile, opened lazily on first use
+// (src/lib/db.ts). pi's session store is untouched by all of this.
+const stateDb = new StateDb(CFG.dbFile);
+const auth: AuthType = new Auth(stateDb);
+const hiddenSessions = new HiddenSessions(stateDb);
 const loginLimiter = new RateLimiter(10, 15 * 60 * 1000);
 const wsLimiter = new RateLimiter(30, 60 * 1000);
 // Password hashes in flight at once. Each scrypt holds 16 MiB and a libuv
@@ -375,7 +378,7 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
   }
 
   // Hide / unhide past sessions (sidebar 'delete' — reversible by design:
-  // ids land in the hidden-sessions state file, never pi's store).
+  // ids land as hidden rows in the state db's sessions table, never pi's store).
   if (req.method === 'POST' && url === route('/api/session/hide')) {
     readBody(req, (err, body) => {
       if (err) { send(res, 400, 'bad request'); return; }
@@ -416,7 +419,7 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
       newSessionCwd: CFG.newSessionCwd,
       agentDir: CFG.agentDir,
       sessionsDir: CFG.sessionsDir,
-      authFile: CFG.authFile,
+      stateDb: CFG.dbFile,
       tmuxSocket: tmux.SOCKET,
       tmuxConf: fs.existsSync(tmux.CONF) ? tmux.CONF : null,
       appRoot: APP_ROOT,

@@ -34,7 +34,8 @@ export const PI_SESSION_DIR: string | undefined = process.env.PI_CODING_AGENT_SE
 
 const home = RAW_ENV.WEB_PI_HOME ?? os.homedir();
 const agentDir = RAW_ENV.WEB_PI_AGENT_DIR ?? path.join(APP_ROOT, '.pi-agent');
-const authFile = RAW_ENV.WEB_PI_AUTH_FILE ?? path.join(APP_ROOT, 'auth.json');
+// web-pi's own persisted state (sqlite: credential + hidden sessions).
+const dbFile = RAW_ENV.WEB_PI_DB_FILE ?? path.join(APP_ROOT, 'webpi.db');
 
 export const ENV = {
   WEB_PI_HOST: RAW_ENV.WEB_PI_HOST,
@@ -44,9 +45,7 @@ export const ENV = {
   WEB_PI_TRUST_PROXY: RAW_ENV.WEB_PI_TRUST_PROXY,
   WEB_PI_HOME: home,
   WEB_PI_AGENT_DIR: agentDir,
-  WEB_PI_AUTH_FILE: authFile,
-  // Operator state lives beside the credential by default.
-  WEB_PI_HIDDEN_FILE: RAW_ENV.WEB_PI_HIDDEN_FILE ?? path.join(path.dirname(authFile), 'hidden-sessions.json'),
+  WEB_PI_DB_FILE: dbFile,
   WEB_PI_CLIENT_DIR: RAW_ENV.WEB_PI_CLIENT_DIR ?? path.join(APP_ROOT, 'dist', 'client'),
   WEB_PI_ASTRO_ENTRY: RAW_ENV.WEB_PI_ASTRO_ENTRY ?? path.join(APP_ROOT, 'dist', 'server', 'entry.mjs'),
   WEB_PI_SESSIONS_DIR: RAW_ENV.WEB_PI_SESSIONS_DIR ?? PI_SESSION_DIR ?? path.join(agentDir, 'sessions'),

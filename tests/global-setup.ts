@@ -1,18 +1,20 @@
 // global-setup.ts — hermetic workspace for the e2e run.
 // The webServer (playwright.config.ts) boots before this runs; that's fine:
-// the server reads the auth file, sessions dir and tmux socket lazily.
+// the server opens the state db, sessions dir and tmux socket lazily.
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { writeCred } from '../src/lib/auth';
+import { setCredential } from '../src/lib/auth';
+import { StateDb } from '../src/lib/db';
 import { MARKER, PASSWORD, TMUX_SOCKET, USERNAME, UUIDV7_SIBLINGS, WORKSPACE } from './env';
 
 export default function globalSetup(): void {
   fs.rmSync(WORKSPACE, { recursive: true, force: true });
   fs.mkdirSync(path.join(WORKSPACE, 'sessions'), { recursive: true });
 
-  // Login credential (Auth.verify() re-reads the file per attempt).
-  writeCred(path.join(WORKSPACE, 'auth.json'), USERNAME, PASSWORD);
+  // Login credential in the state db (Auth reads the row per attempt;
+  // the server opens the db lazily — only after this reset).
+  setCredential(new StateDb(path.join(WORKSPACE, 'webpi.db')), USERNAME, PASSWORD);
 
   // Deterministic command for new/resumed sessions: banner + a shell we can
   // type into. WEB_PI_COMMAND is whitespace-split, so it must be one path.

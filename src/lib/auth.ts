@@ -1,9 +1,9 @@
 // auth.ts — single-user login: username + password,
-// salted scrypt hash in a local file, in-memory session cookies.
-// No account machinery. Fails closed until the cred file exists.
+// salted scrypt hash in the state db (src/lib/db.ts), in-memory session
+// cookies. No account machinery. Fails closed until a credential row
+// exists (set it with `npm run set-password`).
 import * as crypto from 'node:crypto';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
+import type { StateDb } from './db';
 
 const SCRYPT = { N: 16384, r: 8, p: 1, keylen: 64 };
 const SESSION_TTL_MS = 7 * 24 * 3600 * 1000;
@@ -11,20 +11,25 @@ const SESSION_TTL_MS = 7 * 24 * 3600 * 1000;
 interface Cred { username: string; salt: string; hash: string }
 
 export class Auth {
-  private authFile: string;
   private sessions = new Map<string, number>(); // token -> expiry ms
 
-  constructor(authFile: string) { this.authFile = authFile; }
+  constructor(private state: StateDb) {}
 
-  configured(): boolean {
-    try { fs.accessSync(this.authFile, fs.constants.R_OK); return true; }
-    catch { return false; }
-  }
+  configured(): boolean { return this.readCred() !== null; }
 
+  /** Current credential row, or null when unset/unreadable. Read per
+   *  attempt, exactly like the old cred file: a credential written after
+   *  boot (set-password, test fixtures) is picked up with no restart. */
   private readCred(): Cred | null {
-    if (!this.configured()) return null;
-    try { return JSON.parse(fs.readFileSync(this.authFile, 'utf8')) as Cred; }
-    catch { return null; }
+    try {
+      const row = this.state.stmt('SELECT username, salt, hash FROM credential WHERE id = 1')
+        .get() as Partial<Cred> | undefined;
+      if (!row || typeof row.username !== 'string' || typeof row.salt !== 'string'
+        || typeof row.hash !== 'string') return null;
+      return { username: row.username, salt: row.salt, hash: row.hash };
+    } catch {
+      return null; // missing/unreadable db — fail closed, like a missing file
+    }
   }
 
   /** Async scrypt: the hash runs on the libuv threadpool, so login attempts
@@ -112,15 +117,14 @@ export class RateLimiter {
   }
 }
 
-/** Cred-file writer used by set-password. */
-export function writeCred(authFile: string, username: string, password: string): void {
+/** Credential writer used by set-password (and the e2e fixtures). */
+export function setCredential(state: StateDb, username: string, password: string): void {
   const salt = crypto.randomBytes(16);
   const hash = crypto.scryptSync(password, salt, SCRYPT.keylen, SCRYPT);
-  fs.mkdirSync(path.dirname(authFile), { recursive: true });
-  const tmp = authFile + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify({
-    username, salt: salt.toString('hex'), hash: hash.toString('hex'),
-  }), { mode: 0o400 });
-  fs.renameSync(tmp, authFile);
-  fs.chmodSync(authFile, 0o400);
+  state.stmt(`INSERT INTO credential (id, username, salt, hash, updated_at)
+              VALUES (1, ?, ?, ?, ?)
+              ON CONFLICT (id) DO UPDATE SET
+                username = excluded.username, salt = excluded.salt,
+                hash = excluded.hash, updated_at = excluded.updated_at`)
+    .run(username, salt.toString('hex'), hash.toString('hex'), Date.now());
 }

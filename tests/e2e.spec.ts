@@ -5,6 +5,7 @@
 // Runs serially (workers: 1) — see playwright.config.ts.
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { expect, test, type Cookie, type Page } from '@playwright/test';
 import { MARKER, PASSWORD, TMUX_SOCKET, USERNAME, UUIDV7_SIBLINGS, WORKSPACE } from './env';
 
@@ -396,7 +397,7 @@ test('hide: session leaves the sidebar, manage dialog restores it', async ({ pag
   await expect(page.locator('session-sidebar wa-button#manage-hidden')).toHaveCount(0);
 });
 
-test('hide persists across reload in the server-side state file', async ({ page }) => {
+test('hide persists across reload in the sqlite state db', async ({ page }) => {
   await login(page);
   await page.locator(`session-sidebar li[data-resume="${FIXTURE_B}"] wa-button[data-hide]`).click();
   await page.locator('wa-dialog#confirm-hide wa-button#confirm-hide-ok').click();
@@ -407,10 +408,12 @@ test('hide persists across reload in the server-side state file', async ({ page 
   await expect(page.locator(`session-sidebar li[data-resume="${FIXTURE_B}"]`)).toHaveCount(0);
   await expect(page.locator('session-sidebar wa-button#manage-hidden')).toContainText('1 hidden');
 
-  // The state file next to the auth file carries the id (hide ≠ delete:
-  // the fixture session file is untouched).
-  const state = JSON.parse(fs.readFileSync(`${WORKSPACE}/hidden-sessions.json`, 'utf8')) as { hidden: string[] };
-  expect(state.hidden).toContain(FIXTURE_B);
+  // The state db carries the id (hide ≠ delete: the fixture session file
+  // is untouched).
+  const db = new DatabaseSync(`${WORKSPACE}/webpi.db`);
+  const hidden = db.prepare('SELECT session_id FROM sessions WHERE hidden_at IS NOT NULL').all() as Array<{ session_id: string }>;
+  db.close();
+  expect(hidden.map(r => r.session_id)).toContain(FIXTURE_B);
   expect(fs.existsSync(`${WORKSPACE}/sessions/alpha/2026-10-02T10-00-00_${FIXTURE_B}.jsonl`)).toBe(true);
 
   // Tidy via unhide-all so later tests see a clean list.
@@ -498,7 +501,7 @@ test('settings dashboard shows effective config; update dry-run is check-only', 
   expect(text).toContain('web-pi-itest');             // tmux socket (config env)
   expect(text).toContain('cmd.sh');                   // session command
   expect(text).toContain('/tmp/web-pi-itest/sessions'); // sessions dir
-  expect(text).toContain('/tmp/web-pi-itest/auth.json'); // auth file path — path only, never contents
+  expect(text).toContain('/tmp/web-pi-itest/webpi.db'); // state db path — path only, never contents
   await expect(page.locator('#pi-badge')).toContainText(/pi /);
   await expect(page.locator('#pi-declared')).toContainText('declared');
 

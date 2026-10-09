@@ -3,10 +3,11 @@
 //   npm run set-password   (or: node dist-server/server/set-password.js)
 // Piped:  printf 'user\npass\npass\n' | node dist-server/server/set-password.js
 import * as readline from 'node:readline';
-import { writeCred } from '../src/lib/auth';
+import { setCredential } from '../src/lib/auth';
+import { StateDb } from '../src/lib/db';
 import { ENV } from '../src/lib/env';
 
-const authFile = ENV.WEB_PI_AUTH_FILE;
+const stateDb = new StateDb(ENV.WEB_PI_DB_FILE);
 
 // Interactive prompt (TTY): prompt printed BEFORE muting output (else the
 // prompt itself is swallowed and it looks hung — fixed 2026-09-30).
@@ -57,6 +58,6 @@ function readPiped(): Promise<string[]> {
   if (!username) { console.error('username required'); process.exit(1); }
   if (!pw || pw.length < 8) { console.error('password must be >= 8 chars'); process.exit(1); }
   if (pw !== pw2) { console.error('passwords do not match'); process.exit(1); }
-  writeCred(authFile, username, pw);
-  console.log('written:', authFile);
+  setCredential(stateDb, username, pw);
+  console.log('written:', ENV.WEB_PI_DB_FILE);
 })();

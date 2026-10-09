@@ -43,13 +43,15 @@ tmux socket ── session per tab ── pi ── ~/.pi/agent/sessions/
 - **Settings** — `/settings`: read-only dashboard of the effective config
   (listen address, paths, versions) plus one action, a manual update-pi
   button.
-- **Single-user login** — username + password, salted scrypt hash in a
-  local file, `HttpOnly`/`Secure`/`SameSite=Strict` session cookie. No
-  account machinery. Fails closed until the credential exists.
+- **Single-user login** — username + password, salted scrypt hash in the
+  sqlite state db (`webpi.db`), `HttpOnly`/`Secure`/`SameSite=Strict`
+  session cookie. No account machinery. Fails closed until the credential
+  exists.
 
 ## Requirements
 
-- Node ≥ 20 (a C++ toolchain for `node-pty`: build-essential / g++ / python3)
+- Node ≥ 22.13 (for the built-in `node:sqlite`; plus a C++ toolchain for
+  `node-pty`: build-essential / g++ / python3)
 - `tmux` on PATH — pi ships as an npm dependency (`npm install` vendors it)
 - Linux (node-pty + tmux; developed on Debian)
 - Optional, for `/jobs` only: a systemd **user** session reachable from the
@@ -61,7 +63,7 @@ tmux socket ── session per tab ── pi ── ~/.pi/agent/sessions/
 ```sh
 npm install
 npm run build
-npm run set-password          # interactive; creates auth.json (0400)
+npm run set-password          # interactive; writes the credential into webpi.db (0600)
 npm start                     # serves on http://127.0.0.1:3000
 ```
 
@@ -85,7 +87,7 @@ docker compose --profile dev up dev   # astro dev :4321 + API/WS :3001
 The repo is bind-mounted into the container at `/app`; `node_modules` is a
 shadow volume so the container builds its own native deps (`node-pty`)
 without touching the host's. First boot npm-installs (a few minutes);
-later boots self-heal in seconds. Everything is real: `auth.json` login,
+later boots self-heal in seconds. Everything is real: `webpi.db` login,
 session listing, live attach — and pi sessions start in `/app` (the repo),
 self-modification included. Page edits hot-reload through the bind mount.
 
@@ -145,10 +147,9 @@ directly.
 | `WEB_PI_COMMAND` | `<app root>/node_modules/.bin/pi` (falls back to `pi` on PATH) | command run in a new session (whitespace-split; resume appends `--session <id>` — only pi-family CLIs support that) |
 | `WEB_PI_TMUX_SOCKET` | `web-pi` | the tmux socket the app owns |
 | `WEB_PI_TMUX_CONF` | `<app root>/tmux.conf` | tmux server config, applied when the tmux server starts (escape-time, scrollback, truecolour — see the file) |
-| `WEB_PI_AUTH_FILE` | `<app root>/auth.json` | credential file (0400) |
+| `WEB_PI_DB_FILE` | `<app root>/webpi.db` | sqlite state db (0600): login credential + `sessions` overlay table (hidden flags — per-session metadata lands there later). Fresh setup: `npm run set-password` creates it |
 | `WEB_PI_SYSTEMCTL` | `systemctl` | binary used for scheduled jobs (override for tests/odd distros) |
 | `WEB_PI_SYSTEMD_ANALYZE` | `systemd-analyze` | binary used to validate OnCalendar specs |
-| `WEB_PI_HIDDEN_FILE` | `hidden-sessions.json` next to `WEB_PI_AUTH_FILE` | hide-from-list state for past sessions (ids only; session files are never deleted) |
 | `WEB_PI_CLIENT_DIR` | `<app root>/dist/client` | Astro hashed assets |
 | `WEB_PI_ASTRO_ENTRY` | `<app root>/dist/server/entry.mjs` | Astro SSR handler |
 | `WEB_PI_DEV_API` | `http://127.0.0.1:3001` | dev only: where `astro dev` proxies `/api`, `/ws`, login/logout (the `npm run dev:server` process) |
@@ -265,7 +266,7 @@ not persist there.
 
 **App code:** rebuild + `up -d`. The entrypoint hashes the image's source
 tree; on change it syncs app files into the existing volume while volume
-state survives untouched (`auth.json`, `.pi-agent/`, `apps/`, anything not
+state survives untouched (`webpi.db`, `.pi-agent/`, `apps/`, anything not
 in the image). Volumes never re-seed when content hasn't changed.
 
 **Git-owned volume (self-modification, durable local edits):** the named

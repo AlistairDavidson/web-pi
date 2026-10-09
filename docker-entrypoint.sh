@@ -5,7 +5,7 @@
 #   /app is a git checkout    → operator owns updates (git pull, rebuild);
 #                               the image never syncs over it
 #   image content changed     → sync app files into the volume, overwriting;
-#                               volume STATE survives (auth.json, .pi-agent/,
+#                               volume STATE survives (webpi.db, .pi-agent/,
 #                               apps/, anything not in the image)
 #
 # Dev mode bind-mounts the host repo over /app (a git checkout) — the git

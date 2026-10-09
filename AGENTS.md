@@ -8,7 +8,7 @@ README.md.
 `npm run test:e2e` — Playwright integration tests (chromium; browser must
 exist in ~/.cache/ms-playwright). Fully hermetic: the config boots
 `dist-server/server/main.js` against a `/tmp/web-pi-itest` workspace (own
-auth file, fixture pi sessions, dedicated `web-pi-itest` tmux socket, a
+state db, fixture pi sessions, dedicated `webpi-itest` tmux socket, a
 deterministic `cmd.sh` session command). Tests must stay serial
 (workers: 1): they share the per-IP login rate-limit budget and the tmux
 socket, and the rate-limit test must run last. `login()` signs in through
@@ -18,6 +18,15 @@ For authenticated API calls use in-page `fetch` (`page.evaluate`), not
 `page.request`: Playwright's API client doesn't send the `Secure` session
 cookie over the suite's plain-http origin. Build first (`npm run build`)
 or let global-setup do it when dist/ is missing.
+
+## node:sqlite
+
+The state db (`src/lib/db.ts`) uses the built-in `node:sqlite`, which
+still prints a one-line `ExperimentalWarning: SQLite is an experimental
+feature…` the first time it loads in a process. **This warning is
+expected** — it appears in the server's boot log, `set-password` output
+and e2e webServer/test stderr, and means nothing is wrong. Don't add
+suppression for it.
 
 ## Web Awesome (wa-*) components: SSR imports ≠ client imports
 

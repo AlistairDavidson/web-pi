@@ -13,16 +13,16 @@ session lifecycle + graceful shutdown (DESIGN_REVIEW 1.3/1.4):
 - SIGTERM/SIGINT handler: stop accepting connections, send a new 'restart' WS message then close each socket, exit after drain with a short deadline (clients show "server restarting — reconnecting" and the existing backoff reattach lands back on the session)
 
 state directory (DESIGN_REVIEW 3.3) — the landing spot for the sqlite TODO:
-- WEB_PI_STATE_DIR, defaulting to $WEB_PI_HOME/.local/state/web-pi (XDG-style) on a host install; all state defaults key off it: state/auth.json, state/hidden-sessions.json, state/pi-agent/ (seeded from the repo pi/ template as now — credentials + sessions live there)
+- WEB_PI_STATE_DIR, defaulting to $WEB_PI_HOME/.local/state/web-pi (XDG-style) on a host install; all state defaults key off it: state/webpi.db, state/pi-agent/ (seeded from the repo pi/ template as now — credentials + sessions live there)
 - container: WEB_PI_STATE_DIR=/state with a dedicated webpi-state volume — outside the entrypoint-synced /app entirely, so the "anything not in the image is state" footgun is structurally gone, not defended against
-- no permanent migration system: defaults switch in one release; the single existing VPS install gets a one-shot mv of auth.json + .pi-agent (or just re-run set-password) during its next deploy
-- sqlite TODO below lands here as state/webpi.db (absorbing auth + hidden-sessions eventually); note WAL needs care if state ever sits on network storage
+- no migration system: deploy is a fresh setup (re-run set-password); a one-shot mv of .pi-agent / webpi.db is all an existing install needs
+- the sqlite db (landed: webpi.db — login credential + hidden-session ids, node:sqlite, no WAL) moves here as state/webpi.db; note WAL needs care if state ever sits on network storage
 
-sqllite, move state files, config and auth to that (into the state dir above: state/webpi.db)
+sqlite landed (webpi.db: auth + hidden-sessions, node:sqlite, no WAL) — remaining: move the db + remaining state files/config into WEB_PI_STATE_DIR above (state/webpi.db), and absorb job bookkeeping when the in-process scheduler lands
 
 in-process job scheduler (DESIGN_REVIEW 3.1) — replaces systemd user units:
 - drop systemd jobs.ts (unit files, systemctl, systemd-analyze); scheduler runs inside the server, keeping the run-inside-tmux behaviour (runs open on the shared socket — works in container, host, and the future two-container split)
-- persistence: last-fired per job in state/jobs.json now → sqlite job_runs table once the DB exists; on boot, compare last-fired against the schedule window and fire missed runs (systemd Persistent=true equivalent)
+- persistence: last-fired per job in the webpi.db state db (job_runs table — the DB exists now); on boot, compare last-fired against the schedule window and fire missed runs (systemd Persistent=true equivalent)
 - cron-syntax validation moves in-app (small parser dep like cron-parser, or a restricted syntax we validate ourselves) — systemd-analyze is gone with systemd
 - supercronic considered and rejected: same availability as in-process (dies with the container), no catch-up, plus crontab-rewrite/HUP coordination and an extra binary per install shape
 
@@ -51,8 +51,10 @@ ignore pi sessions not related to this project or one of its apps
 console is an app
 scheduler is an app
 Top menu with all apps
-new app button
-delete app button
+new app
+rename app
+set app icon
+delete app
 
 self-naming sessions
 
@@ -62,6 +64,7 @@ side-tab bar lets you open a given app
   zed
   terminal  
   app preview
+generalise pi -> any agent
 
 Better auth
 
@@ -94,6 +97,10 @@ deploy polish (DESIGN_REVIEW 3.2): make the base path one documented value acros
 tmux sessions die with container restarts (sidebar resume covers it) - accept + document, or supervise tmux separately so it outlives the server process. NOTE: the privilege split resolves this — tmux moves to the workspace container, so web restarts/deploys no longer kill sessions; only workspace-container restarts do
 
 installation instructions / script for agents / actual scripts
+
+playwright
+fuzz based integration testing
+
 
 Human:
 make sidebar much nicer - rebuild step by step

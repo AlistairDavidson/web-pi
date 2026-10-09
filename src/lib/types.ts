@@ -87,7 +87,7 @@ export interface SettingsState {
   newSessionCwd: string;
   agentDir: string;
   sessionsDir: string;
-  authFile: string;
+  stateDb: string;
   tmuxSocket: string;
   tmuxConf: string | null;
   appRoot: string;

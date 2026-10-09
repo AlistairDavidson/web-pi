@@ -1,5 +1,6 @@
 node_modules/
 auth.json
+webpi.db
 dist/
 dist-server/
 .astro/

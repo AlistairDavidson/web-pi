@@ -26,14 +26,14 @@ export const envSchema = {
   // Dynamic defaults — see env.ts (homedir / app root / fs probe / cross-var).
   WEB_PI_HOME: { type: 'string', context: 'server', access: 'secret', optional: true },
   WEB_PI_AGENT_DIR: { type: 'string', context: 'server', access: 'secret', optional: true },
-  WEB_PI_AUTH_FILE: { type: 'string', context: 'server', access: 'secret', optional: true },
+  // sqlite state db (credential + hidden sessions) — dynamic default in env.ts.
+  WEB_PI_DB_FILE: { type: 'string', context: 'server', access: 'secret', optional: true },
   WEB_PI_CLIENT_DIR: { type: 'string', context: 'server', access: 'secret', optional: true },
   WEB_PI_ASTRO_ENTRY: { type: 'string', context: 'server', access: 'secret', optional: true },
   WEB_PI_SESSIONS_DIR: { type: 'string', context: 'server', access: 'secret', optional: true },
   WEB_PI_NEW_SESSION_CWD: { type: 'string', context: 'server', access: 'secret', optional: true },
   WEB_PI_COMMAND: { type: 'string', context: 'server', access: 'secret', optional: true },
   WEB_PI_TMUX_CONF: { type: 'string', context: 'server', access: 'secret', optional: true },
-  WEB_PI_HIDDEN_FILE: { type: 'string', context: 'server', access: 'secret', optional: true },
   WEB_PI_SYSTEMCTL: { type: 'string', context: 'server', access: 'secret', default: 'systemctl' },
   WEB_PI_SYSTEMD_ANALYZE: { type: 'string', context: 'server', access: 'secret', default: 'systemd-analyze' },
 } as const satisfies Record<string, ServerEnvField>;
