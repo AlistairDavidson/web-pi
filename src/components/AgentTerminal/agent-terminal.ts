@@ -205,8 +205,11 @@ export class AgentTerminal extends HTMLElement {
         this.terminal?.write('\r\nsigned out\r\n');
       }
       // The server is shutting down (deploy, container stop): the
-      // terminal keeps its session — tmux holds it — and reattaches with
-      // the usual backoff once the server is back.
+      // terminal reattaches with the usual backoff once the server is
+      // back. The session itself survives only on a host install — there
+      // tmux outlives the server; in the container the tmux server dies
+      // with it, and the reattach lands on 'no such live session' (which
+      // reads as ended, below) — the README's accepted trade.
       else if (m.type === 'restart') {
         restarting = true;
         this.status('server restarting — reconnecting …', 'busy');

@@ -67,7 +67,10 @@ npm start                     # serves on http://127.0.0.1:3000
 Put it behind TLS (any reverse proxy) before exposing it anywhere — the
 cookie is `Secure` and login POSTs shouldn't cross plain HTTP. See
 `deploy/` for an nginx reverse-proxy block with WebSocket upgrade, and a
-fail2ban jail for failed logins. Container route:
+fail2ban jail for failed logins. One host only, whatever fronts it —
+sessions and rate limits are in-process state and the tmux server is
+host-local on the app's own socket, so there is no multi-instance/LB
+shape (see [Deploying](#deploying)). Container route:
 
 ```sh
 docker compose up -d        # builds the image, serves on 127.0.0.1:3000
@@ -139,8 +142,8 @@ directly.
 |---|---|---|
 | `WEB_PI_HOST` | `127.0.0.1` | Listen address (loopback + reverse proxy is the intended shape) |
 | `WEB_PI_PORT` | `3000` | Listen port |
-| `WEB_PI_TRUST_PROXY` | `0` | Reverse-proxy hops in front of the server (nginx = `1`, ALB → nginx = `2`). The login/WS rate limits key on the client IP that many entries from the right of `X-Forwarded-For`; the origin check also derives its scheme from the `X-Forwarded-Proto` hop it selects (see [Security model](#security-model)); `0` ignores the headers and uses the socket peer. Set it to match your proxies: too low and every client shares the proxy's bucket, too high and clients can pick their own |
-| `WEB_PI_BASE` | `/` | URL base path, e.g. `/console` on a dedicated vhost (the app wants its own hostname — see [Security model](#security-model)). **Baked into the pages at build time** — set it before `npm run build` *and* at runtime |
+| `WEB_PI_TRUST_PROXY` | `0` | Reverse-proxy hops in front of the server (nginx = `1`, ALB → nginx = `2`; add one per proxy stacked ahead of it). The login/WS rate limits key on the client IP that many entries from the right of `X-Forwarded-For`; the origin check also derives its scheme from the `X-Forwarded-Proto` hop it selects (see [Security model](#security-model)); `0` ignores the headers and uses the socket peer. Set it to match your proxies: too low and every client shares the proxy's bucket, too high and clients can pick their own |
+| `WEB_PI_BASE` | `/` | URL base path for path-mounting on a dedicated vhost (the app wants its own hostname — [Security model](#security-model)); the files that must agree are listed in [The base path](#the-base-path). **Baked into the pages at build time** — set it before `npm run build` *and* at runtime |
 | `WEB_PI_HOME` | `os.homedir()` | `HOME` for spawned processes (tmux, pi) |
 | `WEB_PI_STATE_DIR` | `$WEB_PI_HOME/.local/state/web-pi` | one directory for all web-pi state: the sqlite db (`webpi.db`) and the runtime `pi-agent/` (pi credentials + sessions). Per-path overrides (`WEB_PI_DB_FILE`, `WEB_PI_AGENT_DIR`) still win. In the container compose points it at `/state` on a dedicated volume |
 | `WEB_PI_AGENT_DIR` | `<state dir>/pi-agent` | runtime pi agent dir (config, credentials, sessions for spawned pi) — seeded from the repo's `pi/` template where absent (a stray `PI_CODING_AGENT_DIR` in the server's env is ignored with an error logged) |
@@ -212,10 +215,19 @@ sidebar unless you point `WEB_PI_SESSIONS_DIR` there.
 
 ## Deploying
 
-Container-first:
+One host, one instance, everywhere web-pi runs. It is single-user and
+single-instance by design — sessions and the login/WS rate limits are
+in-process state, and the tmux server is host-local on the app's own
+socket (in a container: in the app's container) — so there is no
+multi-instance or load-balanced shape: run exactly one instance behind
+one proxy. The
+recommended deployment is a single VPS with Docker compose; on AWS, the
+documented path is the same compose setup on a single EC2 instance —
+state lives on the instance's own disk, and it is replaced only when you
+deploy.
 
 ```sh
-docker compose build        # subpath deploy: WEB_PI_BASE=/console docker compose build
+docker compose build        # subpath deploy: 'The base path' below first — WEB_PI_BASE=/webpi docker compose build
 docker compose up -d        # loopback :3000, app on webpi-app, state on webpi-state (/state)
 ```
 
@@ -260,7 +272,8 @@ Front it with TLS — [`deploy/`](deploy/) has:
   (upstream is the published loopback port). One proxy hop, so the server
   runs with `WEB_PI_TRUST_PROXY=1` (compose sets it; set it yourself for a
   host install behind nginx)
-- fail2ban filter + jail watching the nginx access log for failed logins
+- `fail2ban-filter-webpi.conf` + `fail2ban-jail.conf` — fail2ban watching
+  the nginx access log for failed logins (401/429 on the login POST)
 
 State (`webpi.db`, `pi-agent/` — pi credentials + sessions) lives on its
 own `webpi-state` volume at `/state` (`WEB_PI_STATE_DIR`), outside the
@@ -284,9 +297,55 @@ A host install is the same move against the default dir, server stopped:
 needs none of this — just re-run `npm run set-password`.
 
 The old systemd unit is gone: the container *is* the unit (restart policy
-+ healthcheck in compose; `ProtectSystem`-style hardening is the container
-boundary). The original deployment shape still applies — nginx at a
-`/console/` path on a single-purpose box, fail2ban from day one.
+in compose; healthcheck ships in the image; `ProtectSystem`-style
+hardening is the container boundary). nginx in front, fail2ban from day
+one — the same shape on a VPS and on EC2.
+
+**A container restart ends every live session — accepted trade, for now.**
+tmux lives in the app's container, so any container stop (deploy, crash,
+OOM, host reboot) kills the running sessions with it. A *deliberate* stop
+(SIGTERM, `docker compose stop`) is still graceful on the way out: every
+open terminal gets a `restart` message and shows "server restarting —
+reconnecting", the server exits 0 within ~5 s — but the reconnect lands on
+`no such live session` (the sessions died with the container; the client
+treats that as ended). Recovery is the sidebar's resume: nothing is lost —
+every session, finished or not, stays listed from pi's session store, and
+clicking it continues it (`pi --session <id>` appends — the transcript
+outlives the dead tmux session). Expected to improve when the
+serving/working privilege split lands
+([DESIGN_REVIEW.md](DESIGN_REVIEW.md) §1.1): tmux moves to a workspace
+container, and web restarts/deploys stop killing sessions — only
+workspace restarts will.
+
+### The base path
+
+`WEB_PI_BASE` (default `/`) is baked into the pages at build time and read
+again at runtime, while nginx and fail2ban only ever see URLs — so one
+value has to be kept in agreement, by hand, in exactly three files. The
+canonical example is `/webpi`, and each file below carries that value at
+a single definition point:
+
+- **[`compose.yaml`](compose.yaml)** — the `WEB_PI_BASE` variable (in the
+  shell env, or a `.env` next to the file). Compose interpolates that one
+  variable into both the build arg and the runtime env, so the image and
+  the server can't drift apart on their own.
+- **[`deploy/nginx-webpi.conf`](deploy/nginx-webpi.conf)** — the named
+  capture at the head of the location regex, the file's only occurrence
+  (marked with a comment; `proxy_pass` forwards the client's path
+  unchanged, so the one literal both selects and names the prefix).
+- **[`deploy/fail2ban-filter-webpi.conf`](deploy/fail2ban-filter-webpi.conf)**
+  — the POST path inside `failregex`, likewise the file's only
+  occurrence; the NOTE above it points here and at the nginx capture.
+
+Change it at all three definition points, then rebuild the image (it's
+baked in — `docker compose build`), reload nginx, and restart fail2ban.
+A *pulled* image bakes the base at its own build time in CI instead —
+and today the release workflow publishes base-`/` images only, so a
+subpath pull means forking it (or building locally). A host/npm install
+replaces bullet 1 with the plain `WEB_PI_BASE` build-time + runtime env
+(no compose variable). With the default `/` — web-pi on its own hostname
+— none of this applies: proxy `location /` and the filter's POST path
+are `/` and `/login`.
 
 ### Updating
 
@@ -346,7 +405,7 @@ when they modify the app on the server (the rollback TODO builds on this).
   can't stall attached terminals.
 - Auth fails closed: no credential file → no login possible.
 - **Give web-pi its own hostname.** `WEB_PI_BASE` is for path-mounting on
-  a dedicated vhost (`console.example.com/console`), not for riding an
+  a dedicated vhost (`webpi.example.com/webpi`), not for riding an
   existing site: on a shared host every same-origin XSS — anywhere on that
   host — reads this app's responses and drives the terminal, and on this
   app a shell is the product. A cookie `Path` is no boundary to

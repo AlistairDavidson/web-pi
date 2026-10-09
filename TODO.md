@@ -1,7 +1,5 @@
 apps folder that contains git submodules
 
-deployment docs (DESIGN_REVIEW 2/3.1): document VPS/Docker as the recommended shape and single-EC2-with-Docker for AWS; say nothing about ECS (single-host-only note where deploy is discussed). No ECS-specific code — the SIGTERM handler and state dir arrive via the other TODOs anyway
-
 update pi button, auto-update setting
 
 privilege split: serving vs working (DESIGN_REVIEW 1.1) — before apps and self-modification are built on top:
@@ -61,10 +59,6 @@ low priority xterm official addons:
   serialize - "download transcript" / "copy output" button, zero server changes; maybe e2e assertions on terminal state 
 
 
-
-deploy polish (DESIGN_REVIEW 3.2): make the base path one documented value across README, nginx conf and the fail2ban filter (filter hard-codes POST /webpi/login with a NOTE to hand-adjust) — e.g. nginx sets a var, filter docs point at it
-
-tmux sessions die with container restarts (sidebar resume covers it) - accept + document, or supervise tmux separately so it outlives the server process. NOTE: the privilege split resolves this — tmux moves to the workspace container, so web restarts/deploys no longer kill sessions; only workspace-container restarts do
 
 installation instructions / script for agents / actual scripts
 
