@@ -3,9 +3,11 @@
 // Connection life: attach() opens a socket for one target. If it drops
 // without the server ending the attach (proxy idle cut, server restart,
 // network blip), the status says so and the terminal reattaches to the same
-// tmux session with backoff. The server's 'exit' / 'error' end an attach for
-// good — no reconnect, so two tabs bumping each other off a session
-// (`attach -d`) can't loop.
+// tmux session with backoff. The server's 'exit' / 'error' / 'signed-out'
+// end an attach for good — no reconnect, so two tabs bumping each other off
+// a session (`attach -d`) can't loop, and a logged-out token stays logged
+// out. 'restart' (server shutdown) is the exception that reconnects: tmux
+// keeps the session, and the backoff lands back on it once it's back.
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -178,6 +180,7 @@ export class AgentTerminal extends HTMLElement {
     const websocket = new WebSocket(`${proto}//${location.host}${BASE}/ws`);
     this.websocket = websocket;
     let ended = false; // the server ended this attach itself — don't reconnect
+    let restarting = false; // the server announced a shutdown — DO reconnect
 
     websocket.onopen = () => {
       websocket.send(JSON.stringify(msg));
@@ -201,6 +204,13 @@ export class AgentTerminal extends HTMLElement {
         this.status('signed out', 'info');
         this.terminal?.write('\r\nsigned out\r\n');
       }
+      // The server is shutting down (deploy, container stop): the
+      // terminal keeps its session — tmux holds it — and reattaches with
+      // the usual backoff once the server is back.
+      else if (m.type === 'restart') {
+        restarting = true;
+        this.status('server restarting — reconnecting …', 'busy');
+      }
     };
 
     websocket.onclose = () => {
@@ -208,7 +218,7 @@ export class AgentTerminal extends HTMLElement {
       this.websocket = undefined;
       if (this.activeKey !== key) return;
       if (!ended) {
-        if (this.attachedTarget) this.scheduleReconnect();
+        if (this.attachedTarget) this.scheduleReconnect(restarting ? 'server restarting' : 'disconnected');
         else this.status(`could not connect: ${label}`, 'err');
       }
       // The console re-polls state on every close — which also sends an
@@ -223,10 +233,10 @@ export class AgentTerminal extends HTMLElement {
     if (ws) { try { ws.close(); } catch { /* already closed */ } }
   }
 
-  private scheduleReconnect(): void {
+  private scheduleReconnect(reason = 'disconnected'): void {
     const delay = this.reconnectDelay;
     this.reconnectDelay = Math.min(delay * 2, RECONNECT_MAX_MS);
-    this.status(`disconnected — reconnecting in ${Math.round(delay / 1000)}s …`, 'busy');
+    this.status(`${reason} — reconnecting in ${Math.round(delay / 1000)}s …`, 'busy');
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.reconnect();

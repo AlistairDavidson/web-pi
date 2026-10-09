@@ -675,3 +675,39 @@ server.listen(CFG.port, CFG.host, () => {
   }
 });
 
+// ---------- graceful shutdown (SIGTERM / SIGINT) ----------
+// Docker stop, compose, systemd — the container's init relays the signal
+// and the stop must not hang (SIGKILL waits behind stopTimeout, and every
+// attached terminal goes with it). The sequence: stop accepting new
+// connections, tell every open WS 'restart' and close it, then exit once
+// the sockets have drained. shutdownSteps is a small ordered list of
+// closures — other subsystems (e.g. the future in-process scheduler)
+// register into it by pushing; deliberately not a framework, just "later
+// in the array runs later".
+const SHUTDOWN_DEADLINE_MS = 5000;
+const whenClosed = new Promise<void>(resolve => server.once('close', resolve));
+const shutdownSteps: Array<() => void | Promise<void>> = [
+  () => { server.close(); },                        // 1. stop listening
+  () => { closeAllSockets({ type: 'restart' }); },  // 2. notify + close every client
+  () => { server.closeIdleConnections(); return whenClosed; }, // 3. drain
+];
+
+function shutdown(signal: string): void {
+  if (shuttingDown) process.exit(0); // a second signal skips the drain
+  shuttingDown = true;
+  console.log(`${signal} received — shutting down`);
+  // A stuck socket must not hold the stop past the deadline.
+  const deadline = setTimeout(() => {
+    console.error(`shutdown: drain unfinished after ${SHUTDOWN_DEADLINE_MS}ms — exiting`);
+    process.exit(0);
+  }, SHUTDOWN_DEADLINE_MS);
+  (async () => {
+    for (const step of shutdownSteps) {
+      try { await step(); } catch (err) { console.error('shutdown step failed:', err); }
+    }
+    clearTimeout(deadline);
+    process.exit(0);
+  })();
+}
+process.once('SIGTERM', () => shutdown('SIGTERM'));
+process.once('SIGINT', () => shutdown('SIGINT'));
