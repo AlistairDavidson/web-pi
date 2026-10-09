@@ -1,3 +1,7 @@
+// Astro env-schema format on purpose, NOT zod: astro.config.mjs consumes
+// these field descriptors (context/access/type) directly and src/lib/env.ts
+// reads the same table for the plain-tsc server build — a zod conversion
+// would break both. The WEB_PI_* contract stays as-is.
 export type EnvFieldType = 'string' | 'number' | 'boolean';
 
 export interface ServerEnvField {
