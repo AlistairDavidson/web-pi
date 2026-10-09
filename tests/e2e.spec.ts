@@ -3,7 +3,7 @@
 // sidebar's pi-session fixtures, and the full terminal round trip
 // (xterm → WS → node-pty → tmux → back).
 // Runs serially (workers: 1) — see playwright.config.ts.
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { expect, test, type Cookie, type Page } from '@playwright/test';
@@ -326,50 +326,165 @@ test('terminal fills the available space and refits when it shrinks', async ({ p
   expect(await termRows(page)).toBeLessThan(rowsBefore);
 });
 
-// jobs (scheduled jobs, systemd user units): the suite must pass both
-// with and without a reachable `systemctl --user` (CI containers and
-// Docker deploys have none). What runs everywhere is the degraded-mode
-// contract: the /jobs page shows an explanatory notice and the API
-// answers 200/503 — never a stack of 500s. On a host with a working user
-// session (e.g. a dev box) degraded mode isn't reachable — the server
-// would find systemctl usable — so the test skips there; full CRUD needs
-// the real backend. To force degraded mode on such a host, point
-// WEB_PI_SYSTEMCTL at a stub binary when booting the server.
-const systemdUserSession = (() => {
-  try {
-    execFileSync('systemctl', ['--user', 'show-environment'], { stdio: 'ignore' });
-    return true;
-  } catch { return false; }
-})();
+// jobs (in-process scheduler): the backend is inside the server, so the
+// suite exercises the real thing everywhere — no degraded mode, no
+// systemctl dependency. Runs land on the suite's tmux socket like any
+// session; persistence and missed-run catch-up boot a second server on
+// another port against a copy of the state db (rebooting the shared
+// webServer mid-suite would take the login cookie down with it).
 
-test('jobs page degrades to a notice when systemctl --user is absent', async ({ page, request }) => {
-  test.skip(systemdUserSession, 'systemd user session present — degraded mode not reachable');
-  expect((await request.get('/api/jobs')).status()).toBe(401);
+/** Authed in-page JSON fetch (Playwright's API client doesn't send the
+ *  Secure session cookie over the suite's plain-http origin). */
+async function api(page: Page, method: string, url: string, body?: unknown):
+  Promise<{ status: number; json: any }> {
+  return page.evaluate(async ([m, u, b]) => {
+    const r = await fetch(u!, {
+      method: m!, headers: { 'Content-Type': 'application/json' },
+      ...(b === undefined ? {} : { body: JSON.stringify(b) }),
+    });
+    return { status: r.status, json: await r.json().catch(() => null) };
+  }, [method, url, body] as const);
+}
 
+test('jobs: validate, save, run now, delete', async ({ page }) => {
   await login(page);
-  await expect(page.locator('wa-button#nav-jobs')).toHaveCount(1);
+  expect((await api(page, 'GET', '/api/jobs')).json).toMatchObject({ available: true, jobs: [] });
 
-  const r = await page.request.get('/api/jobs');
-  expect(r.status()).toBe(200);
-  expect(await r.json()).toMatchObject({ available: false, jobs: [] });
+  // Cron validation: 5 fields accepted, other syntaxes rejected with the
+  // first error (the old OnCalendar spec no longer parses).
+  const good = await api(page, 'POST', '/api/jobs/validate', { schedule: '*/5 * * * *' });
+  expect(good.status).toBe(200);
+  expect(good.json).toMatchObject({ valid: true, validatedBy: 'cron-parser' });
+  expect(typeof good.json.next).toBe('string');
+  for (const bad of ['daily 08:00', '99 * * * *', '*/5 * * *']) {
+    const r = await api(page, 'POST', '/api/jobs/validate', { schedule: bad });
+    expect(r.json.valid, bad).toBe(false);
+    expect(typeof r.json.error).toBe('string');
+  }
 
+  // Save (bad schedule rejected with 400, not a save).
+  expect((await api(page, 'POST', '/api/jobs',
+    { name: 'itest-job', schedule: 'daily 08:00', command: 'true' })).status).toBe(400);
+  const saved = await api(page, 'POST', '/api/jobs',
+    { name: 'itest-job', schedule: '*/5 * * * *', command: 'sleep 300' });
+  expect(saved.json).toMatchObject({ name: 'itest-job' });
+
+  // The /jobs page shows the job card.
   await page.goto('/jobs');
-  await expect(page.locator('wa-callout#jobs-degraded:not(.hidden)')).toBeVisible();
-  await expect(page.locator('wa-callout#jobs-degraded')).toContainText('systemctl --user');
-  await expect(page.locator('wa-button#jobs-new.hidden')).toHaveCount(1);
+  await expect(page.locator('jobs-app .job')).toHaveCount(1);
+  await expect(page.locator('jobs-app .job-name')).toContainText('itest-job');
+  await expect(page.locator('jobs-app .job-meta')).toContainText('*/5 * * * *');
 
-  const validate = await page.request.post('/api/jobs/validate', { data: { schedule: 'daily 08:00' } });
-  expect(validate.status()).toBe(200);
-  const check = await validate.json() as { valid: boolean; validatedBy: string };
-  expect(check.valid).toBe(true);
-  expect(['basic', 'systemd-analyze']).toContain(check.validatedBy);
+  // Run now: a live webpi-<name> tmux session on the suite's socket.
+  const run = await api(page, 'POST', '/api/jobs/itest-job/run');
+  expect(run.json).toMatchObject({ name: 'itest-job', session: 'webpi-itest-job' });
+  const live = () => {
+    try {
+      return execFileSync('tmux', ['-L', TMUX_SOCKET, 'list-sessions', '-F', '#{session_name}'],
+        { encoding: 'utf8' });
+    } catch { return ''; } // no tmux server yet
+  };
+  await expect.poll(live, { timeout: 10_000 }).toContain('webpi-itest-job');
 
-  // Mutations degrade to 503 (not 500) while the backend is unusable.
-  const create = await page.request.post('/api/jobs',
-    { data: { name: 'itest-job', schedule: 'daily 08:00', command: 'true' } });
-  expect(create.status()).toBe(503);
-  expect((await page.request.post('/api/jobs/itest-job/run')).status()).toBe(503);
-  expect((await page.request.delete('/api/jobs/itest-job')).status()).toBe(503);
+  // The run is live in the listing and the card says so.
+  const listed = await api(page, 'GET', '/api/jobs');
+  const job = listed.json.jobs.find((j: { name: string }) => j.name === 'itest-job');
+  expect(job).toMatchObject({ running: true, session: 'webpi-itest-job' });
+  expect(job.last).toBeTruthy();
+  await page.reload();
+  await expect(page.locator('jobs-app .job wa-badge:has-text("running")')).toHaveCount(1);
+
+  // A second run while the previous one is live is refused (409).
+  expect((await api(page, 'POST', '/api/jobs/itest-job/run')).status).toBe(409);
+
+  // Delete: definition gone, the live run's session is left alone.
+  expect((await api(page, 'DELETE', '/api/jobs/itest-job')).status).toBe(200);
+  expect((await api(page, 'DELETE', '/api/jobs/itest-job')).status).toBe(404);
+  expect((await api(page, 'GET', '/api/jobs')).json.jobs).toEqual([]);
+  expect(live()).toContain('webpi-itest-job');
+  execFileSync('tmux', ['-L', TMUX_SOCKET, 'kill-session', '-t', 'webpi-itest-job']);
+});
+
+test('jobs persist across a server restart; missed runs catch up', async () => {
+  test.setTimeout(120_000);
+
+  // Restart simulation: a copy of the state db carrying the job with its
+  // last fire backdated 3 minutes — the schedule missed windows while the
+  // (new) server was "down". The job lives ONLY in the copy: the webServer's
+  // own ticking scheduler must not be able to fire it, so the catch-up run
+  // is attributable to the restarted server alone.
+  const dbCopy = `${WORKSPACE}/webpi-restart.db`;
+  fs.copyFileSync(`${WORKSPACE}/webpi.db`, dbCopy);
+  const backdate = Date.now() - 3 * 60_000;
+  const w = new DatabaseSync(dbCopy);
+  w.prepare("INSERT INTO jobs (name, schedule, command, created_at) VALUES ('itest-persist', '* * * * *', 'sleep 60', ?)")
+    .run(backdate - 2 * 60_000);
+  w.prepare("INSERT INTO job_runs (job, fired_at, origin) VALUES ('itest-persist', ?, 'schedule')")
+    .run(backdate);
+  w.close();
+
+  // Second server, same workspace shape as the suite webServer (its own
+  // port; the tmux socket and session command are shared).
+  const PORT2 = 3471;
+  const child = spawn('node', ['dist-server/server/main.js'], {
+    env: {
+      ...process.env,
+      WEB_PI_PORT: String(PORT2),
+      WEB_PI_HOST: '127.0.0.1',
+      WEB_PI_DB_FILE: dbCopy,
+      WEB_PI_SESSIONS_DIR: `${WORKSPACE}/sessions`,
+      WEB_PI_AGENT_DIR: `${WORKSPACE}/pi-agent`,
+      WEB_PI_NEW_SESSION_CWD: WORKSPACE,
+      WEB_PI_TMUX_SOCKET: TMUX_SOCKET,
+      WEB_PI_COMMAND: `${WORKSPACE}/cmd.sh`,
+    },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  let bootLog = '';
+  child.stderr!.setEncoding('utf8').on('data', (d: string) => { bootLog += d; });
+
+  const sessions = () => {
+    try {
+      return execFileSync('tmux', ['-L', TMUX_SOCKET, 'list-sessions', '-F', '#{session_name}'],
+        { encoding: 'utf8' });
+    } catch { return ''; }
+  };
+  try {
+    // Booted: the job survived the restart — listed by the new server.
+    await expect.poll(async () => {
+      try { return (await fetch(`http://127.0.0.1:${PORT2}/login`)).status; } catch { return 0; }
+    }, { timeout: 20_000 }).toBe(200);
+    const login2 = await fetch(`http://127.0.0.1:${PORT2}/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: USERNAME, password: PASSWORD }),
+    });
+    const cookie = (login2.headers.get('set-cookie') ?? '').split(';')[0];
+    const listed = await fetch(`http://127.0.0.1:${PORT2}/api/jobs`, { headers: { Cookie: cookie } });
+    const state = await listed.json() as { jobs: Array<{ name: string }> };
+    expect(state.jobs.map(j => j.name)).toContain('itest-persist');
+
+    // Catch-up: the first scheduler tick (≤30s after boot) sees the missed
+    // window and fires ONE run — a live webpi-<name> session on the socket.
+    await expect.poll(sessions, { timeout: 45_000 }).toContain('webpi-itest-persist');
+
+    // ...and the fire is recorded (newer than the backdated row, as catchup).
+    const r = new DatabaseSync(dbCopy);
+    const last = r.prepare("SELECT MAX(fired_at) AS last FROM job_runs WHERE job = 'itest-persist'")
+      .get() as { last: number };
+    const origins = r.prepare("SELECT DISTINCT origin FROM job_runs WHERE job = 'itest-persist'")
+      .all() as Array<{ origin: string }>;
+    r.close();
+    expect(last.last!).toBeGreaterThan(backdate);
+    expect(origins.map(o => o.origin)).toContain('catchup');
+  } finally {
+    child.kill('SIGKILL');
+    await new Promise<void>(resolve => child.once('exit', () => resolve()));
+    if (sessions().includes('webpi-itest-persist')) {
+      execFileSync('tmux', ['-L', TMUX_SOCKET, 'kill-session', '-t', 'webpi-itest-persist']);
+    }
+    fs.rmSync(dbCopy, { force: true });
+    if (bootLog && !/ExperimentalWarning/.test(bootLog)) console.log(`restart-server stderr:\n${bootLog}`);
+  }
 });
 
 test('hide: session leaves the sidebar, manage dialog restores it', async ({ page }) => {
