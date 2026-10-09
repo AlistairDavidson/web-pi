@@ -70,7 +70,9 @@ npm start                     # serves on http://127.0.0.1:3000
 Put it behind TLS (any reverse proxy) before exposing it anywhere — the
 cookie is `Secure` and login POSTs shouldn't cross plain HTTP. See
 `deploy/` for an nginx reverse-proxy block with WebSocket upgrade, and a
-fail2ban jail for failed logins. Container route:
+fail2ban jail for failed logins. One host only, whatever fronts it —
+sessions, rate limits and tmux are in-process, so there is no
+multi-instance/LB shape (see [Deploying](#deploying)). Container route:
 
 ```sh
 docker compose up -d        # builds the image, serves on 127.0.0.1:3000
@@ -138,8 +140,8 @@ directly.
 |---|---|---|
 | `WEB_PI_HOST` | `127.0.0.1` | Listen address (loopback + reverse proxy is the intended shape) |
 | `WEB_PI_PORT` | `3000` | Listen port |
-| `WEB_PI_TRUST_PROXY` | `0` | Reverse-proxy hops in front of the server (nginx = `1`, ALB → nginx = `2`). The login/WS rate limits key on the client IP that many entries from the right of `X-Forwarded-For`; `0` ignores the header and uses the socket peer. Set it to match your proxies: too low and every client shares the proxy's bucket, too high and clients can pick their own |
-| `WEB_PI_BASE` | `/` | URL base path, e.g. `/console` when riding an existing site. **Baked into the pages at build time** — set it before `npm run build` *and* at runtime |
+| `WEB_PI_TRUST_PROXY` | `0` | Reverse-proxy hops in front of the server (nginx = `1`; add one per proxy stacked ahead of it). The login/WS rate limits key on the client IP that many entries from the right of `X-Forwarded-For`; `0` ignores the header and uses the socket peer. Set it to match your proxies: too low and every client shares the proxy's bucket, too high and clients can pick their own |
+| `WEB_PI_BASE` | `/` | URL base path for path-mounting on a vhost — the three files that must agree are listed in [The base path](#the-base-path). **Baked into the pages at build time** — set it before `npm run build` *and* at runtime |
 | `WEB_PI_HOME` | `os.homedir()` | `HOME` for spawned processes (tmux, pi) |
 | `WEB_PI_AGENT_DIR` | `<app root>/.pi-agent` | runtime pi agent dir (config, credentials, sessions for spawned pi) — seeded from the repo's `pi/` template where absent (a stray `PI_CODING_AGENT_DIR` in the server's env is ignored with an error logged) |
 | `WEB_PI_SESSIONS_DIR` | `PI_CODING_AGENT_SESSION_DIR`, else `<agent dir>/sessions` | where to list past pi sessions from |
@@ -219,10 +221,17 @@ sidebar unless you point `WEB_PI_SESSIONS_DIR` there.
 
 ## Deploying
 
-Container-first:
+One host, one instance, everywhere web-pi runs. It is single-user and
+single-instance by design — sessions, the login/WS rate limits and the
+tmux server are all in-process — so there is no multi-instance or
+load-balanced shape: run exactly one instance behind one proxy. The
+recommended deployment is a single VPS with Docker compose; on AWS, the
+documented path is the same compose setup on a single EC2 instance —
+state lives on the instance's own disk, and it is replaced only when you
+deploy.
 
 ```sh
-docker compose build        # subpath deploy: WEB_PI_BASE=/console docker compose build
+docker compose build        # subpath deploy: 'The base path' below first
 docker compose up -d        # loopback :3000, app on the named volume webpi-app
 ```
 
@@ -232,12 +241,49 @@ Front it with TLS — [`deploy/`](deploy/) has:
   (upstream is the published loopback port). One proxy hop, so the server
   runs with `WEB_PI_TRUST_PROXY=1` (compose sets it; set it yourself for a
   host install behind nginx)
-- fail2ban filter + jail watching the nginx access log for failed logins
+- `fail2ban-filter-webpi.conf` + `fail2ban-jail.conf` — fail2ban watching
+  the nginx access log for failed logins (401/429 on the login POST)
 
 The old systemd unit is gone: the container *is* the unit (restart policy
-+ healthcheck in compose; `ProtectSystem`-style hardening is the container
-boundary). The original deployment shape still applies — nginx at a
-`/console/` path on a single-purpose box, fail2ban from day one.
+in compose; healthcheck ships in the image; `ProtectSystem`-style
+hardening is the container boundary). nginx in front, fail2ban from day
+one — the same shape on a VPS and on EC2.
+
+**A container restart ends every live session — accepted trade, for now.**
+tmux lives in the app's container, so any container stop (deploy, crash,
+OOM, host reboot) kills the running sessions with it. Recovery is
+the sidebar's resume: nothing is lost — every session, finished or not,
+stays listed from pi's session store, and clicking it continues it (`pi
+--session <id>` appends — the transcript outlives the dead tmux
+session). Expected to improve when the serving/working privilege split
+lands ([DESIGN_REVIEW.md](DESIGN_REVIEW.md) §1.1): tmux moves to a
+workspace container, and web restarts/deploys stop killing sessions —
+only workspace restarts will.
+
+### The base path
+
+`WEB_PI_BASE` (default `/`) is baked into the pages at build time and read
+again at runtime, while nginx and fail2ban only ever see URLs — so one
+value has to be kept in agreement, by hand, in exactly three files. The
+canonical example is `/webpi`, and each file below carries that value at
+a single definition point:
+
+- **[`compose.yaml`](compose.yaml)** — the `WEB_PI_BASE` variable (in the
+  shell env, or a `.env` next to the file). Compose interpolates that one
+  variable into both the build arg and the runtime env, so the image and
+  the server can't drift apart on their own.
+- **[`deploy/nginx-webpi.conf`](deploy/nginx-webpi.conf)** — the named
+  capture at the head of the location regex, the file's only occurrence
+  (marked with a comment; `proxy_pass` forwards the client's path
+  unchanged, so the one literal both selects and names the prefix).
+- **[`deploy/fail2ban-filter-webpi.conf`](deploy/fail2ban-filter-webpi.conf)**
+  — the POST path inside `failregex`, likewise the file's only
+  occurrence; the NOTE above it points here and at the nginx capture.
+
+Change it at all three definition points, then rebuild the image (it's
+baked in — `docker compose build`), reload nginx, and restart fail2ban.
+With the default `/` — web-pi on its own hostname — none of this applies:
+proxy `location /` and the filter's POST path is `/login`.
 
 ### Updating
 
