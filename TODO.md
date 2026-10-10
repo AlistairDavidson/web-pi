@@ -1,10 +1,35 @@
-apps folder that contains git submodules
+## Infrastructure
+kyseley - move sqlite code to that format
 
-management page (replaces the panic-endpoint idea) — rollback AND applying changes in one place:
+minio npm, container - so web apps in future can handle file uploads
+  astro upload endpoint apps can use
+
+winston, winston-loki, loki container - observability.
+  add logs to code
+
+preact signals
+
+## Management page
+rollback AND applying changes in one place:
 - the one unmodifiable part of the software: programmatic enforcement — the apply step rejects any patch that changes it from within the container; it can only be modified in the original project
 - whole page, designed after the split lands (its "protected from modification" property is exactly what the split makes enforceable); handles picking a git commit, rebuilding, swapping, basic feedback
 
+## Console features
+Zed editor as a webapp
+side-tab bar lets you open a given app
+  pi
+  zed
+  terminal  
+  app preview
 
+self-naming sessions
+
+generalise pi -> any agent
+
+Better auth
+
+## Apps
+apps folder that contains git submodules
 group sessions by app
 ignore pi sessions not related to this project or one of its apps
 console is an app
@@ -16,46 +41,34 @@ set app icon
 delete app
 console sidebar for when in other apps (in which case maybe console isn't an app)
 
-self-naming sessions
-
-Zed editor as a webapp
-side-tab bar lets you open a given app
-  pi
-  zed
-  terminal  
-  app preview
-generalise pi -> any agent
-
-Better auth
-
-when it stabilises, maybe build on pi-durable (is tmux still necessary with this?)
-
 app management mcp
 how to build an app skills
 
+## Quality
 grab soothing-booking's approach to APIs and error handling
+- brand ids and anything else that needs it
 
-low priority xterm official addons:
-  unicode-graphemes - emoji/combining chars currently render wrong-width in agent output (6.0-only on npm, experimental)
+playwright fuzzer? fuzz based integration testing
 
-  font decision first, then: bundled mono webfont via web-fonts addon (needs xterm 6.1-beta) + ligatures if a ligature font
-  skip: attach (our WS JSON protocol is richer: attach modes, resize, errors, status), canvas (deprecated, removed in xterm 6)
-
-  search addon + ctrl+F bar (wa-input cluster in terminal toolbar, NOT the session sidebar - 15s innerHTML poll eats state) server backfill via `tmux capture-pane -S -5000 -p` written to WS on attach so resumed sessions have searchable scrollback
-  
-  serialize - "download transcript" / "copy output" button, zero server changes; maybe e2e assertions on terminal state 
-
-
-
+## Distribution
 installation instructions / script for agents / actual scripts
 
-playwright
-fuzz based integration testing
-
-winston logging and some kind of observability
-
-Human:
+## Human UX tasks
 make sidebar much nicer - rebuild step by step
 Skills and other methods to enforce my coding patterns
 Write a refined agent workflow
 HIG skill
+
+## Deferred, ignore
+xterm:
+  unicode-graphemes - emoji/combining chars currently render wrong-width in agent output (6.0-only on npm, experimental)
+  
+  font decision first, then: bundled mono webfont via web-fonts addon (needs xterm 6.1-beta) + ligatures if a ligature font
+  skip: attach (our WS JSON protocol is richer: attach modes, resize, errors, status), canvas (deprecated, removed in xterm 6)
+  
+  search addon + ctrl+F bar (wa-input cluster in terminal toolbar, NOT the session sidebar - 15s innerHTML poll eats state) server backfill via `tmux capture-pane -S -5000 -p` written to WS on attach so resumed sessions have searchable scrollback
+
+serialize - "download transcript" / "copy output" button, zero server changes; maybe e2e assertions on terminal state
+
+
+when it stabilises, maybe build on pi-durable (is tmux still necessary with this?)
