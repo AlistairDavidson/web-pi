@@ -3,7 +3,19 @@
 Notes for coding agents working in this repo. Overview + architecture: see
 README.md.
 
+## Code conventions
+
+`docs/CODE_STYLE.md` covers the correctness rules: Result families with
+closed error codes, branded IDs, shared node-free schemas, thin Astro API
+routes behind the main.ts gate, HTML web components, and forms.
+`docs/REFACTOR_STYLE.md` covers porting older code into them. Formatting
+and comment density aren't prescribed; match the surrounding code.
+
 ## Testing
+
+`npm run check` — `astro check` (the `.astro` files, `src/components`,
+tests) plus a no-emit `tsc` of the server build. `astro build` does
+not type-check, so run this before review.
 
 `npm run test:unit` — node:test units in `tests/unit/` against the
 compiled `dist-server` — `npm run build` first (tsc-only is enough:

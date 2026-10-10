@@ -21,7 +21,7 @@ const B_ID = 'bbbbbbbb-bbbb-4000-8000-bbbbbbbbbbbb';
 test('title cache: warm scan re-opens nothing; mtime and size each invalidate alone; gone files prune', async () => {
   const { promises: fsp } = await import('node:fs');
   const { listSessions } = await import(pathToFileURL(
-    path.join(ROOT, 'dist-server', 'src', 'lib', 'sessions.js')).href);
+    path.join(ROOT, 'dist-server', 'src', 'lib', 'sessions.js')).href) as typeof import('../src/lib/sessions');
 
   // Count the module's file reads through the fs.promises object this
   // process shares with the compiled module (sessions.ts reads via
