@@ -297,5 +297,13 @@ jobs-app { display: block; min-height: 100dvh; }
   font-size: var(--wa-font-size-2xs); min-height: 1.4em;
   margin-block-start: var(--wa-space-3xs);
 }
-.schedule-feedback.ok { color: var(--wa-color-success-fill-normal); }
-.schedule-feedback.err { color: var(--wa-color-danger-fill-normal); }
+.schedule-feedback.ok { color: var(--wa-color-success-on-quiet); }
+.schedule-feedback.err { color: var(--wa-color-danger-on-quiet); }
+
+/* Field messages in a wa-input / wa-textarea hint slot (WaInputField,
+   WaTextareaField): the hint text, then the validation message
+   validation-enhancer writes into .field-error. */
+.field-hint { display: flex; flex-direction: column; gap: var(--wa-space-3xs); }
+/* on-quiet: the text token (fill-normal is a background fill — near-black red in dark mode) */
+.field-error { color: var(--wa-color-danger-on-quiet); }
+.field-error:empty { display: none; }

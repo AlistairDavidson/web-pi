@@ -9,9 +9,9 @@
 // cost of not firing while the server is down — boot catch-up covers that.
 //
 // SECURITY INVARIANT: job names are validated (JOB_NAME_RE) before they
-// touch the db or tmux — saveJob checks the normalized name itself; every
-// other entry point takes a JobName, which untrusted input only gets by
-// passing JobNameSchema at the request boundary — and commands are arbitrary shell strings BY
+// touch the db or tmux — every entry point takes a JobName, which
+// untrusted input only gets by passing JobNameSchema / JobSaveSchema
+// (src/schemas) at the request boundary — and commands are arbitrary shell strings BY
 // DESIGN (typed by the authenticated user, at a web shell's privilege) —
 // but a command only ever reaches tmux as tmux's own command string,
 // passed as argv elements to execFile: never through a server-side
@@ -22,19 +22,15 @@ import type { CalendarCheck, JobsState, ScheduledJob } from './types';
 import { hasSession, jobSessionName, liveSessionNames, newSession } from './tmux';
 import type { ResultFailure, ResultSuccess } from '../types/result';
 import { asJobName, type JobName, type TmuxSessionName } from '../types/branded';
-import { JOB_NAME_RE, normalizeJobName } from '../schemas/patterns';
-
-const MAX_SCHEDULE = 120;
-const MAX_COMMAND = 4000;
-
-export interface SaveInput { name: string; schedule: string; command: string }
+import { MAX_SCHEDULE, type SaveInput } from '../schemas/jobs';
 
 // ---------- results (HTTP statuses are mapped in the HTTP layer) ----------
 
 export type JobData = { name: JobName };
 
-export type SaveJobErrorCode =
-  'invalid_job_name' | 'command_required' | 'invalid_command' | 'invalid_schedule' | 'database_error';
+/** invalid_schedule: the schedule is not valid 5-field cron (the shape —
+ *  name, lengths, one line — was already checked by JobSaveSchema). */
+export type SaveJobErrorCode = 'invalid_schedule' | 'database_error';
 export type SaveJobSuccess = ResultSuccess<'save_job', JobData>;
 export type SaveJobFailure = ResultFailure<'save_job', JobData, SaveJobErrorCode>;
 export type SaveJobResult = SaveJobSuccess | SaveJobFailure;
@@ -306,21 +302,15 @@ export class Scheduler {
     return { ok: true, resultType: 'list_jobs', data: { available: true, detail: null, jobs } } satisfies ListJobsSuccess;
   }
 
-  /** Create or update a job: normalize + validate, upsert into the db. The
-   *  next tick (≤30s) picks the new schedule up; a schedule that is already
-   *  overdue fires as a catch-up, like systemd's Persistent=true. */
+  /** Create or update a job: cron check, then upsert into the db. The
+   *  input was parsed by JobSaveSchema at the boundary (name normalized +
+   *  branded, schedule/command trimmed and shape-checked). The next tick
+   *  (≤30s) picks the new schedule up; a schedule that is already overdue
+   *  fires as a catch-up, like systemd's Persistent=true. */
   async saveJob(input: SaveInput) {
-    const normalized = normalizeJobName(input.name ?? '');
-    const name = asJobName(normalized);
+    const { name, schedule, command } = input;
     const fail = (errorCode: SaveJobErrorCode, errorMessage: string) =>
       ({ ok: false, resultType: 'save_job', data: { name }, errorCode, errorMessage }) satisfies SaveJobFailure;
-    if (!JOB_NAME_RE.test(normalized)) return fail('invalid_job_name', 'invalid job name');
-    const schedule = (input.schedule ?? '').trim();
-    const command = (input.command ?? '').trim();
-    if (!command) return fail('command_required', 'command is required');
-    if (command.length > MAX_COMMAND || /[\r\n]/.test(command)) {
-      return fail('invalid_command', 'invalid command (too long or multi-line)');
-    }
     const check = checkCron(schedule);
     if (!check.valid) return fail('invalid_schedule', check.error ?? 'invalid schedule');
     try {

@@ -15,15 +15,19 @@ export const SESSION_ID_RE = /^[0-9a-zA-Z\-]{1,64}$/;
  *  40-char cap rejected every run of a job named longer than 34. */
 export const TMUX_SESSION_NAME_RE = /^[a-zA-Z0-9_\-]{1,64}$/;
 
+/** Longest job name — as typed (JobSaveSchema) and once normalized
+ *  (JOB_NAME_RE). Normalizing never lengthens a name. */
+export const MAX_JOB_NAME = 40;
+
 /** Job name charset: tmux-session-name-safe. Names starting with "webpi-"
  *  are rejected so a job can never produce a doubly-prefixed (confusingly
  *  nested) webpi-webpi-* run session. */
-export const JOB_NAME_RE = /^(?!webpi-)[a-z0-9][a-z0-9_\-]{0,39}$/;
+export const JOB_NAME_RE = new RegExp(`^(?!webpi-)[a-z0-9][a-z0-9_\\-]{0,${MAX_JOB_NAME - 1}}$`);
 
 /** Normalize a user-supplied job name the way /api/new does for sessions. */
 export function normalizeJobName(raw: string): string {
   return raw.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-')
-    .replace(/^-+|-+$/g, '').slice(0, 40);
+    .replace(/^-+|-+$/g, '').slice(0, MAX_JOB_NAME);
 }
 
 /** Normalize a user-supplied new-session name (POST /api/new): the same

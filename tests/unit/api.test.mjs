@@ -6,9 +6,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  loginBody, newSessionBody, jobSaveBody, jobValidateBody,
+  loginBody, loginForm, newSessionBody, jobValidateBody,
   hideBody, unhideBody, updatePiBody, autoUpdateBody,
 } from '../../dist-server/src/schemas/api.js';
+import { JobSaveSchema } from '../../dist-server/src/schemas/jobs.js';
 import { parseZod } from '../../dist-server/src/lib/web/parsing.service.js';
 import { firstIssueText } from '../../dist-server/src/lib/web/responses.service.js';
 
@@ -46,15 +47,45 @@ test('newSessionBody: any string name — emptiness is the handler\'s call', () 
   assert.equal(ok(newSessionBody, { name: 5 }), false);
 });
 
-test('jobSaveBody / jobValidateBody: three strings / one string', () => {
-  assert.deepEqual(parse(jobSaveBody, { name: 'n', schedule: '*/5 * * * *', command: 'true', extra: 1 }),
-    { name: 'n', schedule: '*/5 * * * *', command: 'true' });
-  assert.equal(ok(jobSaveBody, { name: 'n', schedule: '*/5 * * * *' }), false); // command missing
-  assert.equal(ok(jobSaveBody, { name: 5, schedule: 's', command: 'c' }), false);
+test('JobSaveSchema: normalizes the name, trims, and names each failing field', () => {
+  assert.deepEqual(parse(JobSaveSchema, { name: '  Nightly Check ', schedule: ' */5 * * * * ', command: ' true ', extra: 1 }),
+    { name: 'nightly-check', schedule: '*/5 * * * *', command: 'true' });
+  // exactly 40 as typed passes
+  assert.equal(parse(JobSaveSchema, { name: 'x'.repeat(40), schedule: 's', command: 'c' }).name, 'x'.repeat(40));
+  // the cron *validity* is saveJob's (cron-parser stays server-side)
+  assert.equal(ok(JobSaveSchema, { name: 'n', schedule: 'daily 08:00', command: 'true' }), true);
+  const cases = [
+    [{ name: '!!!', schedule: 's', command: 'c' }, 'name: name is required'],
+    [{ name: 'webpi-x', schedule: 's', command: 'c' }, /^name: use letters/],
+    // too long as typed: rejected, never silently cut to 40
+    [{ name: 'x'.repeat(41), schedule: 's', command: 'c' }, 'name: name is too long (max 40)'],
+    [{ name: 'n', schedule: '  ', command: 'c' }, 'schedule: schedule is required'],
+    [{ name: 'n', schedule: 'x'.repeat(121), command: 'c' }, /^schedule: schedule is too long/],
+    [{ name: 'n', schedule: 'a\nb', command: 'c' }, 'schedule: schedule must be one line'],
+    [{ name: 'n', schedule: 's', command: '   ' }, 'command: command is required'],
+    [{ name: 'n', schedule: 's', command: 'a\nb' }, 'command: command must be one line'],
+    [{ name: 'n', schedule: 's', command: 'x'.repeat(4001) }, /^command: command is too long/],
+    [{ name: 5, schedule: 's', command: 'c' }, /^name: /],
+  ];
+  for (const [input, expected] of cases) {
+    const text = issueText(JobSaveSchema, input);
+    if (expected instanceof RegExp) assert.match(text, expected, JSON.stringify(input));
+    else assert.equal(text, expected, JSON.stringify(input));
+  }
+});
+
+test('jobValidateBody: one string', () => {
   // validate: '' passes — checkCron reports 'schedule is required' with a 200
   assert.deepEqual(parse(jobValidateBody, { schedule: '' }), { schedule: '' });
   assert.equal(ok(jobValidateBody, {}), false);
   assert.equal(ok(jobValidateBody, { schedule: 5 }), false);
+});
+
+test('loginForm: stricter than loginBody — empty fields fail in the browser', () => {
+  assert.equal(ok(loginForm, { username: 'u', password: 'p' }), true);
+  assert.equal(issueText(loginForm, { username: '', password: 'p' }), 'username: enter your username');
+  assert.equal(issueText(loginForm, { username: 'u', password: '' }), 'password: enter your password');
+  assert.equal(ok(loginBody, { username: '', password: '' }), true); // the server stays permissive
 });
 
 test('hideBody: id must match SESSION_ID_RE; the message names it', () => {

@@ -1,5 +1,7 @@
 // scheduler.test.mjs — the Scheduler's Result families (src/lib/jobs.ts):
-// one case per error code of saveJob / deleteJob / runJob / listJobs, and
+// one case per error code of saveJob / deleteJob / runJob / listJobs (the
+// form-shape rules saveJob used to check are JobSaveSchema's now —
+// api.test.mjs), and
 // the 40-char job-name regression (runs of long names used to be refused by
 // tmux's 40-char session-name cap). tmux runs against a private
 // ABSOLUTE-path socket set before the import (tmux.ts binds SOCKET at module
@@ -18,6 +20,10 @@ const SOCKET = process.env.WEB_PI_TMUX_SOCKET;
 
 const { Scheduler } = await import('../../dist-server/src/lib/jobs.js');
 const { StateDb } = await import('../../dist-server/src/lib/db.js');
+const { JobSaveSchema } = await import('../../dist-server/src/schemas/jobs.js');
+
+/** saveJob takes what POST /api/jobs parsed with JobSaveSchema. */
+const parsed = (input) => JobSaveSchema.parse(input);
 
 const haveTmux = (() => { try { execFileSync('tmux', ['-V'], { stdio: 'ignore' }); return true; } catch { return false; } })();
 
@@ -35,30 +41,27 @@ function brokenScheduler() {
 
 const GOOD = { name: 'nightly', schedule: '*/5 * * * *', command: 'true' };
 
-test('saveJob: normalizes the name and succeeds', async () => {
+test('saveJob: a parsed save succeeds with the normalized name', async () => {
   const s = freshScheduler();
-  assert.deepEqual(await s.saveJob({ ...GOOD, name: '  Nightly Check ' }),
+  assert.deepEqual(await s.saveJob(parsed({ ...GOOD, name: '  Nightly Check ' })),
     { ok: true, resultType: 'save_job', data: { name: 'nightly-check' } });
 });
 
-test('saveJob: one failure per error code', async () => {
+test('saveJob: invalid_schedule (not 5-field cron), database_error', async () => {
   const s = freshScheduler();
-  const code = async (input) => (await s.saveJob(input)).errorCode;
-  assert.equal(await code({ ...GOOD, name: '!!!' }), 'invalid_job_name');
-  assert.equal(await code({ ...GOOD, name: 'webpi-x' }), 'invalid_job_name');
-  assert.equal(await code({ ...GOOD, command: '   ' }), 'command_required');
-  assert.equal(await code({ ...GOOD, command: 'a\nb' }), 'invalid_command');
-  assert.equal(await code({ ...GOOD, command: 'x'.repeat(4001) }), 'invalid_command');
-  assert.equal(await code({ ...GOOD, schedule: 'daily 08:00' }), 'invalid_schedule');
-  assert.equal(await code({ ...GOOD, schedule: '' }), 'invalid_schedule');
-  const failed = await brokenScheduler().saveJob(GOOD);
+  for (const schedule of ['daily 08:00', '99 * * * *', '*/5 * * *']) {
+    const r = await s.saveJob(parsed({ ...GOOD, schedule }));
+    assert.equal(r.errorCode, 'invalid_schedule', schedule);
+    assert.ok(r.errorMessage.length > 0);
+  }
+  const failed = await brokenScheduler().saveJob(parsed(GOOD));
   assert.equal(failed.errorCode, 'database_error');
   assert.match(failed.errorMessage, /^could not save job: /);
 });
 
 test('deleteJob: success, job_not_found, database_error', async () => {
   const s = freshScheduler();
-  await s.saveJob(GOOD);
+  await s.saveJob(parsed(GOOD));
   assert.deepEqual(await s.deleteJob('nightly'), { ok: true, resultType: 'delete_job', data: { name: 'nightly' } });
   const gone = await s.deleteJob('nightly');
   assert.equal(gone.errorCode, 'job_not_found');
@@ -68,7 +71,7 @@ test('deleteJob: success, job_not_found, database_error', async () => {
 
 test('listJobs: the jobs state on success, database_error when the db is gone', async () => {
   const s = freshScheduler();
-  await s.saveJob(GOOD);
+  await s.saveJob(parsed(GOOD));
   const listed = await s.listJobs();
   assert.equal(listed.ok, true);
   assert.equal(listed.data.available, true);
@@ -83,7 +86,7 @@ test('runJob: job_not_found; tmux_error (no server behind the socket) still spen
   assert.equal(missing.errorCode, 'job_not_found');
   assert.deepEqual(missing.data, { name: 'nope', session: 'webpi-nope' });
 
-  await s.saveJob(GOOD);
+  await s.saveJob(parsed(GOOD));
   const refused = await s.runJob('nightly');
   assert.equal(refused.ok, false);
   assert.equal(refused.errorCode, 'tmux_error');
@@ -117,7 +120,7 @@ test('runJob: opens the run, then run_active while it lives; 40-char names run t
   execFileSync('tmux', ['-S', SOCKET, '-f', conf, 'start-server']);
   try {
     const s = freshScheduler();
-    await s.saveJob({ ...GOOD, command: 'sleep 10' });
+    await s.saveJob(parsed({ ...GOOD, command: 'sleep 10' }));
     assert.deepEqual(await s.runJob('nightly'),
       { ok: true, resultType: 'run_job', data: { name: 'nightly', session: 'webpi-nightly' } });
     const again = await s.runJob('nightly');
@@ -125,7 +128,7 @@ test('runJob: opens the run, then run_active while it lives; 40-char names run t
     assert.equal(again.data.session, 'webpi-nightly');
 
     const long = 'x'.repeat(40);
-    await s.saveJob({ ...GOOD, name: long, command: 'sleep 10' });
+    await s.saveJob(parsed({ ...GOOD, name: long, command: 'sleep 10' }));
     const ran = await s.runJob(long);
     assert.equal(ran.ok, true, ran.errorMessage);
     assert.equal((await s.listJobs()).data.jobs.find(j => j.name === long).running, true);

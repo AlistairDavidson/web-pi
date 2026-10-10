@@ -8,9 +8,17 @@ import '@awesome.me/webawesome/dist/components/dialog/dialog.js';
 import '@awesome.me/webawesome/dist/components/input/input.js';
 import '@awesome.me/webawesome/dist/components/textarea/textarea.js';
 import '@awesome.me/webawesome/dist/components/toast/toast.js';
+// Registers <validation-enhancer-zod> (and the base <validation-enhancer>).
+import 'validation-enhancer/zod';
+import type { ValidationEnhancerZod } from 'validation-enhancer/zod';
+import { JobSaveSchema } from '../../schemas/jobs';
 
 type WaDialog = HTMLElement & { open: boolean };
-type WaFormControl = HTMLElement & { value: string; disabled: boolean };
+/** wa-input / wa-textarea surface used here. An empty wa-input's value is
+ *  null, not ''. */
+type WaFormControl = HTMLElement & {
+  value: string | null; disabled: boolean; setCustomValidity(message: string): void;
+};
 type WaToast = HTMLElement & {
   create(message: string, options?: Record<string, unknown>): Promise<unknown>;
 };
@@ -33,12 +41,19 @@ export class JobsApp extends HTMLElement {
       location.href = `${BASE}/`;
     };
     (this.querySelector('#jobs-new') as HTMLElement).onclick = () => this.openDialog(null);
-    (this.querySelector('#job-save') as HTMLElement).onclick = () => this.save();
+    // The footer button lives outside the form (dialog footer slot):
+    // submit the form so <validation-enhancer-zod> validates it first.
+    (this.querySelector('#job-save') as HTMLElement).onclick = () => this.jobForm().requestSubmit();
     (this.querySelector('#job-delete-confirm') as HTMLElement).onclick = () => this.deleteJob();
     (this.querySelector('#job-schedule') as WaFormControl)
       .addEventListener('input', () => this.queueValidate());
-    (this.querySelector('#job-form') as HTMLFormElement)
-      .addEventListener('submit', e => { e.preventDefault(); this.save(); });
+    // Valid submits only: the enhancer stops an invalid one from
+    // propagating, so the save listener sits ABOVE it — a listener on the
+    // form itself would fire (target phase) before validation ran.
+    this.addEventListener('submit', e => { e.preventDefault(); void this.save(); });
+    // The dialog validates against the same schema POST /api/jobs parses with.
+    void customElements.whenDefined('validation-enhancer-zod').then(() =>
+      (this.querySelector('validation-enhancer-zod') as ValidationEnhancerZod).setZodSchema(JobSaveSchema));
 
     this.load();
     this.pollTimer = setInterval(() => this.load(), 15000);
@@ -130,6 +145,48 @@ export class JobsApp extends HTMLElement {
 
   // ---- create / edit ----
 
+  private jobForm(): HTMLFormElement {
+    return this.querySelector('#job-form') as HTMLFormElement;
+  }
+
+  private field(name: string): WaFormControl | null {
+    return this.jobForm().querySelector(`[name="${name}"]`) as WaFormControl | null;
+  }
+
+  /** The field's message element (its hint slot — WaInputField). */
+  private fieldError(control: WaFormControl): HTMLElement | null {
+    const id = control.getAttribute('aria-errormessage');
+    return id ? this.querySelector(`#${CSS.escape(id)}`) : null;
+  }
+
+  /** Reset every field's validation state (a re-opened dialog starts clean). */
+  private clearFieldErrors(): void {
+    for (const name of ['name', 'schedule', 'command']) {
+      const control = this.field(name);
+      if (!control) continue;
+      control.setCustomValidity('');
+      control.classList.remove('valid', 'invalid');
+      control.removeAttribute('aria-invalid');
+      const message = this.fieldError(control);
+      if (message) message.textContent = '';
+    }
+  }
+
+  /** A 400's per-field issues, shown where the client-side errors go. The
+   *  custom validity clears itself once the user edits the field (the
+   *  enhancer re-validates against the schema). */
+  private showFieldErrors(issues: Record<string, string>): void {
+    for (const [name, text] of Object.entries(issues)) {
+      const control = this.field(name);
+      if (!control) continue;
+      control.setCustomValidity(text);
+      control.classList.add('invalid');
+      control.setAttribute('aria-invalid', 'true');
+      const message = this.fieldError(control);
+      if (message) message.textContent = text;
+    }
+  }
+
   private openDialog(job: ScheduledJob | null): void {
     this.editing = job?.name ?? null;
     const dlg = this.querySelector('#job-dialog') as WaDialog;
@@ -141,6 +198,7 @@ export class JobsApp extends HTMLElement {
     name.disabled = job !== null; // the name is the job identity — no renames
     schedule.value = job?.schedule ?? '';
     command.value = job?.command ?? '';
+    this.clearFieldErrors();
     this.setFeedback(null);
     this.validate();
     dlg.open = true;
@@ -167,7 +225,7 @@ export class JobsApp extends HTMLElement {
   }
 
   private async validate(): Promise<void> {
-    const schedule = (this.querySelector('#job-schedule') as WaFormControl).value.trim();
+    const schedule = ((this.querySelector('#job-schedule') as WaFormControl).value ?? '').trim();
     if (!schedule) { this.setFeedback(null); return; }
     try {
       const r = await fetch(`${BASE}/api/jobs/validate`, {
@@ -178,23 +236,25 @@ export class JobsApp extends HTMLElement {
     } catch { /* transient — the save path re-validates server-side */ }
   }
 
+  /** Runs only for a submit the enhancer let through (the schema passed
+   *  client-side); the server re-validates with the same schema. */
   private async save(): Promise<void> {
     if (this.inflight) return;
-    const name = (this.querySelector('#job-name') as WaFormControl).value.trim();
-    const schedule = (this.querySelector('#job-schedule') as WaFormControl).value.trim();
-    const command = (this.querySelector('#job-command') as WaFormControl).value.trim();
-    if (!name || !schedule || !command) {
-      this.toast('name, schedule and command are all required', 'warning', 'triangle-exclamation');
-      return;
-    }
+    const value = (name: string): string => this.field(name)?.value ?? '';
+    const name = value('name');
+    const schedule = value('schedule');
+    const command = value('command');
     this.inflight = true;
     try {
       const r = await fetch(`${BASE}/api/jobs`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, schedule, command }),
       });
-      const body = await r.json().catch(() => ({})) as { name?: string; session?: string; error?: string; detail?: string | null };
+      const body = await r.json().catch(() => ({})) as {
+        name?: string; session?: string; error?: string; detail?: string | null; issues?: Record<string, string>;
+      };
       if (!r.ok) {
+        if (body.issues) this.showFieldErrors(body.issues);
         this.toast(`${body.error ?? 'could not save job'}${body.detail ? ` — ${body.detail}` : ''}`,
           'danger', 'triangle-exclamation');
         return;
@@ -248,4 +308,4 @@ export class JobsApp extends HTMLElement {
   }
 }
 
-customElements.define('jobs-app', JobsApp);
+if (!customElements.get('jobs-app')) customElements.define('jobs-app', JobsApp);
