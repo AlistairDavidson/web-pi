@@ -1,11 +1,11 @@
 // frames.test.mjs — the WS client-frame gate (parseClientMsg + the zod
-// schemas ClientMsg is z.infer'd from, src/lib/types.ts). The accepted /
+// schemas ClientMsg is z.infer'd from, src/schemas/frames.ts). The accepted /
 // rejected surface must match the hand-rolled parseClientMsg it replaced
 // exactly: malformed frames answer null (the caller drops them), they are
 // never thrown on.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseClientMsg } from '../../dist-server/src/lib/types.js';
+import { parseClientMsg } from '../../dist-server/src/schemas/frames.js';
 
 test('accepts each frame shape, stripping unknown extra keys', () => {
   assert.deepEqual(parseClientMsg('{"type":"input","data":"hi"}'), { type: 'input', data: 'hi' });

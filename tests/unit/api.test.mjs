@@ -1,13 +1,23 @@
 // api.test.mjs — request-body schemas for the JSON endpoints
-// (src/lib/api.ts): shape-level acceptance and the exact parse outputs the
-// handlers consume. Domain rules that stay with the domain code (job-name
+// (src/schemas/api.ts): shape-level acceptance and the exact parse outputs
+// the handlers consume, and the 400 text a failure renders as
+// (parseZod → firstIssueText, src/lib/web). Domain rules that stay with the domain code (job-name
 // regex, cron schedules in jobs.ts) are covered by jobs.test.mjs, not here.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   loginBody, newSessionBody, jobSaveBody, jobValidateBody,
-  hideBody, unhideBody, updatePiBody, firstIssue,
-} from '../../dist-server/src/lib/api.js';
+  hideBody, unhideBody, updatePiBody, autoUpdateBody,
+} from '../../dist-server/src/schemas/api.js';
+import { parseZod } from '../../dist-server/src/lib/web/parsing.service.js';
+import { firstIssueText } from '../../dist-server/src/lib/web/responses.service.js';
+
+/** The one-line 400 text a failed body renders as. */
+const issueText = (schema, v) => {
+  const r = parseZod(v, schema);
+  assert.equal(r.ok, false, JSON.stringify(v));
+  return firstIssueText(r.issues);
+};
 
 const ok = (schema, v) => schema.safeParse(v).success;
 const parse = (schema, v) => {
@@ -52,9 +62,7 @@ test('hideBody: id must match SESSION_ID_RE; the message names it', () => {
   for (const bad of [{}, { id: '' }, { id: 'has spaces' }, { id: 5 }, { id: 'x'.repeat(65) }]) {
     assert.equal(ok(hideBody, bad), false, JSON.stringify(bad));
   }
-  const r = hideBody.safeParse({ id: 'has spaces' });
-  assert.ok(!r.success);
-  assert.equal(firstIssue(r.error), 'id: invalid session id');
+  assert.equal(issueText(hideBody, { id: 'has spaces' }), 'id: invalid session id');
 });
 
 test('unhideBody: {all:true} or a valid {id}; all wins when both are present', () => {
@@ -65,6 +73,10 @@ test('unhideBody: {all:true} or a valid {id}; all wins when both are present', (
   for (const bad of [{}, { all: 'yes' }, { all: 1 }, { all: false }, { id: 'garbage!' }, { id: 5 }, null]) {
     assert.equal(ok(unhideBody, bad), false, JSON.stringify(bad));
   }
+  // a bad id names the field; a shape matching neither branch gets the
+  // union's own message (zod's default would only be 'Invalid input')
+  assert.equal(issueText(unhideBody, { id: 'garbage!' }), 'id: invalid session id');
+  assert.match(issueText(unhideBody, {}), /invalid session id$/);
 });
 
 test('updatePiBody: dryRun defaults false; only booleans pass', () => {
@@ -77,8 +89,14 @@ test('updatePiBody: dryRun defaults false; only booleans pass', () => {
   }
 });
 
-test('firstIssue renders "field: message" for a 400 body', () => {
-  const r = newSessionBody.safeParse({ name: 5 });
-  assert.ok(!r.success);
-  assert.match(firstIssue(r.error), /^name: /);
+test('autoUpdateBody: one boolean; anything else names the field', () => {
+  assert.deepEqual(parse(autoUpdateBody, { enabled: true }), { enabled: true });
+  for (const bad of [{}, { enabled: 'yes' }, { enabled: 1 }]) {
+    assert.equal(ok(autoUpdateBody, bad), false, JSON.stringify(bad));
+  }
+  assert.equal(issueText(autoUpdateBody, { enabled: 'yes' }), 'enabled: enabled must be a boolean');
+});
+
+test('a failed body renders "field: message" (the 400 text)', () => {
+  assert.match(issueText(newSessionBody, { name: 5 }), /^name: /);
 });

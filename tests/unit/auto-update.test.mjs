@@ -18,6 +18,9 @@ import {
 
 const PI = '@earendil-works/pi-coding-agent';
 
+/** A read's value, asserting the read succeeded (database_read). */
+const value = r => { assert.equal(r.ok, true, r.errorMessage); return r.data.value; };
+
 // ---------- range-spec construction ----------
 
 test('autoUpdateSpec: the declared range becomes the npm spec, or null', () => {
@@ -89,7 +92,7 @@ test('parseNpmViewVersion: single string, ascending array, junk', () => {
 test('state db settings kv: default null, write + overwrite', () => {
   const db = new StateDb(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webpi-au-')), 'webpi.db'));
   assert.equal(db.getSetting('nope'), null);
-  assert.equal(autoUpdateEnabled(db), false); // default OFF
+  assert.equal(value(autoUpdateEnabled(db)), false); // default OFF
   db.setSetting('k', '1');
   assert.equal(db.getSetting('k'), '1');
   db.setSetting('k', '2');
@@ -160,10 +163,10 @@ test('performAutoUpdateCheck: newer in-range version installs via the declared-r
   // The install ran with the DECLARED-RANGE spec — never @latest.
   const args = fs.readFileSync(path.join(root, 'install-args.log'), 'utf8').trim();
   assert.equal(args, `install ${PI}@^1.0.1`);
-  const check = lastCheck(db);
+  const check = value(lastCheck(db));
   assert.equal(check.outcome, 'installed');
   assert.match(check.detail, /1\.1\.0/);
-  const upd = lastUpdate(db);
+  const upd = value(lastUpdate(db));
   assert.equal(upd.ok, true);
   assert.equal(upd.before, '1.0.1');
   assert.equal(upd.after, '1.1.0');
@@ -180,10 +183,10 @@ test('performAutoUpdateCheck: already newest in range → up-to-date, no install
   await performAutoUpdateCheck({ db, appRoot: root });
 
   assert.equal(fs.existsSync(path.join(root, 'install-args.log')), false);
-  const check = lastCheck(db);
+  const check = value(lastCheck(db));
   assert.equal(check.outcome, 'up-to-date');
   assert.match(check.detail, /pi 1\.1\.0 is the newest within \^1\.0\.1/);
-  assert.equal(lastUpdate(db), null); // no install → no update outcome
+  assert.equal(value(lastUpdate(db)), null); // no install → no update outcome
 });
 
 test('performAutoUpdateCheck: installed above the range is left alone (never downgraded into range)', async t => {
@@ -195,7 +198,7 @@ test('performAutoUpdateCheck: installed above the range is left alone (never dow
 
   await performAutoUpdateCheck({ db, appRoot: root });
   assert.equal(fs.existsSync(path.join(root, 'install-args.log')), false);
-  const check = lastCheck(db);
+  const check = value(lastCheck(db));
   assert.equal(check.outcome, 'up-to-date');
   assert.equal(check.detail, 'pi 2.0.0 is above the declared range ^1.0.1 — left alone');
 });
@@ -209,7 +212,7 @@ test('performAutoUpdateCheck: an unparseable installed version is never touched'
 
   await performAutoUpdateCheck({ db, appRoot: root });
   assert.equal(fs.existsSync(path.join(root, 'install-args.log')), false);
-  const check = lastCheck(db);
+  const check = value(lastCheck(db));
   assert.equal(check.outcome, 'up-to-date');
   assert.equal(check.detail, 'installed pi "not-a-version" does not compare as a version — left alone');
 });
@@ -224,7 +227,7 @@ test('performAutoUpdateCheck: npm view failure is recorded, nothing installed', 
   await performAutoUpdateCheck({ db, appRoot: root });
 
   assert.equal(fs.existsSync(path.join(root, 'install-args.log')), false);
-  const check = lastCheck(db);
+  const check = value(lastCheck(db));
   assert.equal(check.outcome, 'failed');
   assert.match(check.detail, /npm view failed/);
 });
@@ -250,13 +253,13 @@ test('performAutoUpdateCheck: a concurrent update is refused by the busy guard',
   }
   assert.equal(fs.existsSync(log), true, 'the first install never started');
   await performAutoUpdateCheck({ db, appRoot: root });         // refused (busy)
-  assert.equal(lastUpdate(db).ok, false);
-  assert.match(lastUpdate(db).detail, /already running/);
-  assert.equal(lastCheck(db).outcome, 'failed');
+  assert.equal(value(lastUpdate(db)).ok, false);
+  assert.match(value(lastUpdate(db)).detail, /already running/);
+  assert.equal(value(lastCheck(db)).outcome, 'failed');
 
   await first; // the real update finishes and records its own outcome
-  assert.equal(lastUpdate(db).ok, true);
-  assert.equal(lastCheck(db).outcome, 'installed');
+  assert.equal(value(lastUpdate(db)).ok, true);
+  assert.equal(value(lastCheck(db)).outcome, 'installed');
 });
 
 // ---------- the periodic wiring (mock timers, injected check) ----------
@@ -282,7 +285,7 @@ test('AutoUpdater: OFF schedules nothing; ON checks after the first delay, then 
   // Toggling ON persists, then arms a first check one delay later, then
   // every interval.
   up.setEnabled(true);
-  assert.equal(autoUpdateEnabled(db), true); // persisted
+  assert.equal(value(autoUpdateEnabled(db)), true); // persisted
   assert.equal(checks, 0);                   // not before the delay
   await tick(1_000);
   assert.equal(checks, 1);                   // the first check
@@ -295,7 +298,7 @@ test('AutoUpdater: OFF schedules nothing; ON checks after the first delay, then 
 
   // OFF stops everything.
   up.setEnabled(false);
-  assert.equal(autoUpdateEnabled(db), false);
+  assert.equal(value(autoUpdateEnabled(db)), false);
   await tick(60_000);
   assert.equal(checks, 3);
 });
@@ -343,6 +346,49 @@ test('setEnabled / setAutoUpdateEnabled: success is a database_update result', (
   assert.deepEqual(setAutoUpdateEnabled(db, true), { ok: true, resultType: 'database_update', data: { changes: 1 } });
   const up = new AutoUpdater({ db, appRoot: '/tmp', check: () => Promise.resolve() });
   assert.equal(up.setEnabled(false).ok, true);
-  assert.equal(autoUpdateEnabled(db), false);
+  assert.equal(value(autoUpdateEnabled(db)), false);
+  up.stop();
+});
+
+test('reads: an unreadable db is database_error (never "off" / "never"); a corrupt row reads as never', () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webpi-au-')), 'not-a-dir');
+  fs.writeFileSync(file, '');
+  const broken = new StateDb(path.join(file, 'webpi.db'));
+  for (const r of [autoUpdateEnabled(broken), lastCheck(broken), lastUpdate(broken)]) {
+    assert.equal(r.ok, false);
+    assert.equal(r.resultType, 'database_read');
+    assert.equal(r.errorCode, 'database_error');
+  }
+  assert.match(autoUpdateEnabled(broken).errorMessage, /^could not read the auto-update setting: /);
+
+  const db = new StateDb(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webpi-au-')), 'webpi.db'));
+  db.setSetting('piAutoUpdate.lastCheck', '{not json');
+  db.setSetting('piAutoUpdate.lastUpdate', '"a string, not an outcome"');
+  assert.equal(value(lastCheck(db)), null);
+  assert.equal(value(lastUpdate(db)), null);
+});
+
+test('AutoUpdater: an unreadable setting at the probe neither checks nor gives up — it re-probes', async t => {
+  t.mock.timers.enable({ now: 0 });
+  const db = new StateDb(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webpi-au-')), 'webpi.db'));
+  db.stmt('DROP TABLE settings').run(); // every settings read now fails
+  let checks = 0;
+  const up = new AutoUpdater({
+    db, appRoot: '/tmp', firstDelayMs: 1_000, intervalMs: 5_000,
+    check: () => { checks++; return Promise.resolve(); },
+  });
+  const logged = t.mock.method(console, 'error', () => {});
+  up.start();
+  t.mock.timers.tick(1_000);
+  assert.equal(checks, 0, 'no npm on a guess');
+  assert.equal(logged.mock.callCount(), 1);
+  t.mock.timers.tick(1_000);
+  assert.equal(logged.mock.callCount(), 2, 're-probed after another delay');
+
+  // The db recovers, with the setting ON: the next probe runs the check.
+  db.stmt('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)').run();
+  setAutoUpdateEnabled(db, true);
+  t.mock.timers.tick(1_000);
+  assert.equal(checks, 1);
   up.stop();
 });

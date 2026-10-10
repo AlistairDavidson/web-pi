@@ -1,18 +1,19 @@
 // api.ts — zod schemas for the JSON request bodies the REST endpoints
-// accept (server/main.ts). readBody (there) already caps the size and
-// guarantees a JSON object; these are the field-level gate on top, so
-// handlers use parsed fields without typeof dances, and a mistyped field
-// is a 400 that names itself (firstIssue).
+// accept. Node-free (docs/CODE_STYLE.md §5): the API routes
+// (src/pages/api/**) parse with them via parseAndValidateAPIRequest, the
+// login route in server/main.ts with safeParse, and forms can validate
+// client-side against the same definitions. A failed parse is a 400 whose
+// body names the field (responses.service.ts).
 //
-// The ID rules (regex + brand) live in src/schemas/ids.ts and are reused
-// here, so a parsed id is already a PiSessionId. What deliberately does
-// NOT live here: cron schedules and job-name normalization (jobs.ts —
-// saveJob normalizes, then validates against JOB_NAME_RE) and value
-// normalization (name slugification in main.ts, resize clamps) — that is
-// domain logic, not shape checking, and moving it into schemas would split
-// one rule across two places.
+// The ID rules (regex + brand) live in ids.ts and are reused here, so a
+// parsed id is already a PiSessionId. What deliberately does NOT live
+// here: cron schedules and job-name normalization (jobs.ts — saveJob
+// normalizes, then validates against JOB_NAME_RE) and value normalization
+// (name slugification in /api/new, resize clamps) — that is domain logic,
+// not shape checking, and moving it into schemas would split one rule
+// across two places.
 import { z } from 'zod';
-import { PiSessionIdSchema } from '../schemas/ids';
+import { PiSessionIdSchema } from './ids';
 
 /** POST /login — both fields must be strings; a parse failure answers 401
  *  upstream (like the old typeof check), because fail2ban counts 401/429
@@ -35,22 +36,18 @@ export const jobValidateBody = z.object({ schedule: z.string() });
 export const hideBody = z.object({ id: PiSessionIdSchema });
 
 /** POST /api/session/unhide — {all:true} (restore everything) or {id} to
- *  restore one; all wins when both are present, like the old check. */
+ *  restore one; all wins when both are present, like the old check. The
+ *  union's own message: zod's default for a failed union is only
+ *  'Invalid input'. */
 export const unhideBody = z.union([
   z.object({ all: z.literal(true) }),
   z.object({ id: PiSessionIdSchema }),
-]);
+], { error: 'invalid session id' });
 
 /** POST /api/update-pi — dryRun defaults to false (a real update), like
- *  the old `dryRun === true`; a mistyped dryRun is now a 400 instead of
+ *  the old `dryRun === true`; a mistyped dryRun is a 400 instead of
  *  silently falling through to a real install. */
 export const updatePiBody = z.object({ dryRun: z.boolean().default(false) });
 
-/** First issue of a failed parse as a one-line 400 body:
- *  'field: message' (or the bare message at the root). */
-export function firstIssue(err: z.ZodError): string {
-  const i = err.issues[0];
-  if (!i) return 'bad request';
-  const at = i.path.join('.');
-  return at ? `${at}: ${i.message}` : i.message;
-}
+/** POST /api/auto-update-pi — the toggle's one boolean. */
+export const autoUpdateBody = z.object({ enabled: z.boolean({ error: 'enabled must be a boolean' }) });

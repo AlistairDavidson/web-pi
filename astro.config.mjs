@@ -7,9 +7,10 @@ import lit from '@awesome.me/astro-lit';
 // 'astro:env/server' directly). Plain data in envField() output shape.
 import { envSchema } from './src/lib/env-schema';
 
-// SSR build: Astro renders pages on demand (middleware-mode handler), the
-// compiled Node server (dist-server/) calls into it for page routes and
-// keeps serving the REST API + WS→node-pty bridge itself. One process.
+// SSR build: Astro renders pages AND the JSON API (src/pages/api) on
+// demand (middleware-mode handler); the compiled Node server (dist-server/)
+// gates every request (origin, session) before calling into it, and keeps
+// login/logout and the WS→node-pty bridge itself. One process.
 //
 // WEB_PI_BASE is baked into the pages at build time — for subpath deploys
 // (e.g. /console on a dedicated vhost; the app wants its own hostname,
@@ -17,11 +18,11 @@ import { envSchema } from './src/lib/env-schema';
 // AND at server runtime; the pages and the server must agree.
 const base = process.env.WEB_PI_BASE ?? '/';
 
-// Dev (`astro dev`) only: the REST API + terminal WS live in the Node
-// server (server/main.ts), not in Astro — without a proxy every /api, /ws
-// and login/logout POST 404s against the dev server and the console shows
-// no sessions. `npm run dev:server` runs that half on :3001; Vite forwards
-// to it. GET/HEAD /login and /logout stay on the dev server (they are the
+// Dev (`astro dev`) only: the JSON API needs the services server/main.ts
+// builds (src/middleware.ts answers 503 without them), and the terminal WS
+// and login/logout live in the Node server itself — so `npm run dev:server`
+// runs that half on :3001 (rebuilding its Astro entry first; API-route
+// edits need a dev:server restart) and Vite forwards to it. GET/HEAD /login and /logout stay on the dev server (they are the
 // real Astro pages) — `bypass` returning the URL hands those back to the
 // dev server instead of proxying (vite: string → serve locally).
 // NOTE: `server.proxy` is inert outside `astro dev` (build never runs a
@@ -39,7 +40,18 @@ const devProxy = {
 
 export default defineConfig({
   output: 'server',
-  adapter: node({ mode: 'middleware' }),
+  // bodySizeLimit: the adapter's default is 1 GiB. The JSON API's bodies
+  // are tiny; 10 KiB matches the cap server/main.ts's readBody had (an
+  // oversized body aborts mid-stream and fails to parse — a 400).
+  adapter: node({ mode: 'middleware', bodySizeLimit: 10 * 1024 }),
+  // Astro's own origin check is OFF on purpose: server/main.ts already
+  // rejects every cross-origin non-GET before a request reaches Astro
+  // (originOk(), WEB_PI_TRUST_PROXY-aware). Astro's check derives the
+  // expected origin from the request URL, which behind a TLS-terminating
+  // proxy is http:// — it would 403 same-origin form posts and every
+  // bodyless POST/DELETE (run job, delete job). One authoritative check;
+  // tests/e2e.spec.ts covers it. (docs/CODE_STYLE.md §6)
+  security: { checkOrigin: false },
   integrations: [lit()], // Web Awesome SSR (declarative shadow DOM)
   base,
   srcDir: './src',

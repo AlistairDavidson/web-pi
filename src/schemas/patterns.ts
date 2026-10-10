@@ -25,3 +25,11 @@ export function normalizeJobName(raw: string): string {
   return raw.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-')
     .replace(/^-+|-+$/g, '').slice(0, 40);
 }
+
+/** Normalize a user-supplied new-session name (POST /api/new): the same
+ *  slug rules, capped at 30 (the sidebar input's maxlength). '' means
+ *  nothing usable was typed. */
+export function normalizeSessionName(raw: string): string {
+  return raw.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '').slice(0, 30);
+}

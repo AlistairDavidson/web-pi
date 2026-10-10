@@ -116,17 +116,21 @@ Notes:
   `node-pty` build; the prod image (`web-pi:local`) stays slim.
 
 **On the host** (no docker): two processes — `astro dev` serves the pages
-(HMR), but the REST API and the terminal WS live in the Node server, not in
-Astro; the Vite server proxies `/api`, `/ws`, and login/logout POSTs to it:
+(HMR); the JSON API routes (`src/pages/api`) need the services the Node
+server builds (they answer 503 without them), and the terminal WS and
+login/logout live in the Node server itself, so the Vite server proxies
+`/api`, `/ws`, and login/logout POSTs to it:
 
 ```sh
-npm run dev:server   # API + WS half on :3001 (compiles dist-server first)
+npm run dev:server   # API + WS half on :3001 (builds Astro + dist-server first)
 npm run dev          # astro dev on :4321, proxying to the dev API server
 ```
 
-Everything works against the dev server as it does in production, and the
-login rate limit is in-memory: restart `dev:server` to clear it while
-iterating on the login page. Override the proxy target with `WEB_PI_DEV_API`
+Everything works against the dev server as it does in production. Page
+edits hot-reload; an API-route edit needs a `dev:server` restart (it
+serves the API from its own Astro build). The login rate limit is
+in-memory: restart `dev:server` to clear it while iterating on the login
+page. Override the proxy target with `WEB_PI_DEV_API`
 if you run the API half elsewhere.
 
 ## Configuration (environment)
@@ -634,11 +638,20 @@ edits and the future apply step builds from.
 - `src/components` — web components: `<console-app>`, `<session-sidebar>`,
   `<agent-terminal>` (xterm.js island); each static shell is SSR'd by an
   Astro wrapper (`ConsoleApp.astro`, `AgentTerminal.astro`)
-- `src/lib` — shared strict TS: auth (scrypt + sessions + rate limiter),
-  tmux helpers, pi session-store parser, scheduled jobs (in-process
-  scheduler), wire types,
-  typed env schema + reads (`env-schema.ts` / `env.ts`, the `WEB_PI_*` contract)
-- `server` — the Node server: Astro SSR (middleware) + assets + REST + WS → node-pty → tmux
+- `src/lib` — shared strict TS: auth (scrypt + persisted sessions + rate
+  limiter), tmux helpers, pi session-store parser, scheduled jobs
+  (in-process scheduler), wire types, typed env schema + reads
+  (`env-schema.ts` / `env.ts`, the `WEB_PI_*` contract); `services.ts`
+  (the stateful services the server hands Astro in `locals`); `web/` —
+  request parsing, Result→Response mapping, locals narrowing
+- `src/pages/api` — the JSON API as thin Astro routes (parse → one
+  service call → response), only reachable through the server's
+  origin + session gate (`src/middleware.ts` fails closed without it)
+- `src/schemas` — node-free zod schemas shared by server and browser
+  (request bodies, WS frames, branded IDs); `src/types` — the `Result`
+  contract and branded ID types. Conventions: `docs/CODE_STYLE.md`
+- `server` — the Node server: origin + session gate, login/logout,
+  assets, the Astro SSR handler (pages + API), WS → node-pty → tmux
 - `src/pages/jobs.astro` + `src/components/JobsApp/` — the scheduled-jobs
   page (list/create/edit/run/delete, cron validation)
 - `pi/` — the controlled pi agent-dir template (settings, MCPs, skills,

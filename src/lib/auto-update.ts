@@ -13,7 +13,7 @@
 // (installed by hand via the button) is left alone: latest-in-range <
 // installed means no update, and auto-update never downgrades into range.
 import { execFile } from 'node:child_process';
-import { databaseUpdate, type StateDb } from './db';
+import { databaseRead, databaseUpdate, type StateDb } from './db';
 import type { AutoUpdateCheck, AutoUpdateResult } from './types';
 import { PI_PACKAGE, npmPath, piDeclared, piInstalled, runPiUpdate } from './settings';
 
@@ -117,34 +117,45 @@ export function parseNpmViewVersion(out: string): string | null {
 
 // ---------- outcome persistence (settings kv) ----------
 
-function readJsonSetting<T>(db: StateDb, key: string): T | null {
-  try {
-    const raw = db.getSetting(key);
-    const v = raw === null ? null : JSON.parse(raw) as T;
-    return v && typeof v === 'object' ? v : null;
-  } catch { return null; } // a corrupt row reads as "never"
+/** A stored outcome, or null for a missing — or corrupt — row (a corrupt
+ *  row reads as "never": it is data we wrote, not a db failure). */
+function parseJsonSetting<T>(raw: string | null): T | null {
+  if (raw === null) return null;
+  let v: unknown;
+  try { v = JSON.parse(raw); } catch { return null; }
+  return v && typeof v === 'object' ? v as T : null;
 }
 
+/** An unreadable db is a database_error — never read as "never". */
+function readJsonSetting<T>(db: StateDb, key: string) {
+  return databaseRead(`could not read ${key}`, () => parseJsonSetting<T>(db.getSetting(key)));
+}
+
+/** Persist an outcome. Best-effort by design: a background check has no
+ *  caller to report to, so a failed write is logged and the next check
+ *  writes again. */
 function writeJsonSetting(db: StateDb, key: string, value: unknown): void {
-  try { db.setSetting(key, JSON.stringify(value)); }
-  catch (err) { console.error(`pi auto-update: could not persist ${key}:`, (err as Error).message); }
+  const saved = databaseUpdate(`pi auto-update: could not persist ${key}`, () =>
+    db.setSetting(key, JSON.stringify(value)));
+  if (!saved.ok) console.error(saved.errorMessage);
 }
 
-/** Read the persisted toggle. Default OFF — a missing row is OFF. */
-export function autoUpdateEnabled(db: StateDb): boolean {
-  try { return db.getSetting(KEY_ENABLED) === '1'; }
-  catch { return false; }
+/** Read the persisted toggle (database_read: value true/false). Default
+ *  OFF — a missing row is OFF; an unreadable db is a database_error, not
+ *  OFF. */
+export function autoUpdateEnabled(db: StateDb) {
+  return databaseRead('could not read the auto-update setting', () => db.getSetting(KEY_ENABLED) === '1');
 }
 
 export function setAutoUpdateEnabled(db: StateDb, on: boolean) {
   return databaseUpdate('could not save the setting', () => db.setSetting(KEY_ENABLED, on ? '1' : '0'));
 }
 
-export function lastCheck(db: StateDb): AutoUpdateCheck | null {
+export function lastCheck(db: StateDb) {
   return readJsonSetting<AutoUpdateCheck>(db, KEY_LAST_CHECK);
 }
 
-export function lastUpdate(db: StateDb): AutoUpdateResult | null {
+export function lastUpdate(db: StateDb) {
   return readJsonSetting<AutoUpdateResult>(db, KEY_LAST_UPDATE);
 }
 
@@ -286,7 +297,15 @@ export class AutoUpdater {
     if (this.probe || this.timer) return; // already armed
     this.probe = setTimeout(() => {
       this.probe = null;
-      if (!autoUpdateEnabled(this.deps.db)) return;
+      const enabled = autoUpdateEnabled(this.deps.db);
+      if (!enabled.ok) {
+        // Unreadable setting: neither ON nor OFF is known, and npm never
+        // runs on a guess — look again after another delay.
+        console.error(`pi auto-update: ${enabled.errorMessage} — retrying`);
+        this.armProbe();
+        return;
+      }
+      if (!enabled.data.value) return;
       this.timer = setInterval(() => { void this.runCheck(); }, this.intervalMs);
       void this.runCheck();
     }, this.firstDelayMs);

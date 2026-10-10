@@ -7,7 +7,8 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { runPiUpdate, updateResultBody, PI_PACKAGE } from '../../dist-server/src/lib/settings.js';
+import { runPiUpdate, PI_PACKAGE } from '../../dist-server/src/lib/settings.js';
+import { updateResultBody } from '../../dist-server/src/lib/web/responses.service.js';
 
 /** An app tree with pi installed at `installed`. */
 function fakeAppRoot(installed) {

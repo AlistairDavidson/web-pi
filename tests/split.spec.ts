@@ -92,7 +92,7 @@ test('absolute socket: 503 + no fork while the workspace server is down; session
     // Workspace server down: guard refuses — 503, the message, and NO
     // tmux server forked as the web uid (the socket file must not appear).
     const refused = await fetch(`${BASE}/api/new`, {
-      method: 'POST', headers: { cookie }, body: JSON.stringify({ name: 'split-test' }),
+      method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'split-test' }),
     });
     expect(refused.status).toBe(503);
     expect(((await refused.json()) as { error: string }).error)
@@ -147,7 +147,7 @@ test('absolute socket: 503 + no fork while the workspace server is down; session
     expect(fs.statSync(socket).mode & 0o777).toBe(0o660);
 
     const ok = await fetch(`${BASE}/api/new`, {
-      method: 'POST', headers: { cookie }, body: JSON.stringify({ name: 'split-live' }),
+      method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'split-live' }),
     });
     expect(ok.status).toBe(200);
 
