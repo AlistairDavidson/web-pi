@@ -317,3 +317,32 @@ test('AutoUpdater: boot with the setting already ON checks after the delay', asy
   assert.equal(checks, 1);
   up.stop();
 });
+
+test('setEnabled: a failed save answers database_error and leaves the timers alone', async t => {
+  t.mock.timers.enable({ now: 0 });
+  // A state db that can never open: its parent path is a regular file.
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webpi-au-')), 'not-a-dir');
+  fs.writeFileSync(file, '');
+  const db = new StateDb(path.join(file, 'webpi.db'));
+  let checks = 0;
+  const up = new AutoUpdater({
+    db, appRoot: '/tmp', firstDelayMs: 1_000, intervalMs: 5_000,
+    check: () => { checks++; return Promise.resolve(); },
+  });
+  const saved = up.setEnabled(true);
+  assert.equal(saved.ok, false);
+  assert.equal(saved.errorCode, 'database_error');
+  assert.match(saved.errorMessage, /^could not save the setting: /);
+  t.mock.timers.tick(10_000);
+  assert.equal(checks, 0, 'nothing armed by a save that failed');
+  up.stop();
+});
+
+test('setEnabled / setAutoUpdateEnabled: success is a database_update result', () => {
+  const db = new StateDb(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webpi-au-')), 'webpi.db'));
+  assert.deepEqual(setAutoUpdateEnabled(db, true), { ok: true, resultType: 'database_update', data: { changes: 1 } });
+  const up = new AutoUpdater({ db, appRoot: '/tmp', check: () => Promise.resolve() });
+  assert.equal(up.setEnabled(false).ok, true);
+  assert.equal(autoUpdateEnabled(db), false);
+  up.stop();
+});

@@ -2,10 +2,11 @@
 // described exactly once, on both ends).
 
 import { z } from 'zod';
+import type { JobName, PiSessionId, TmuxSessionName } from '../types/branded';
 
 export interface PastSession {
   /** pi session id (uuid) — resume target */
-  id: string;
+  id: PiSessionId;
   /** first-user-message preview */
   title: string;
   mtime: number;
@@ -16,7 +17,7 @@ export interface PastSession {
 }
 
 export interface LiveSession {
-  name: string;
+  name: TmuxSessionName;
   windows: number;
   created: string;
   attached: boolean;
@@ -38,7 +39,7 @@ export interface ConsoleState {
 
 export interface ScheduledJob {
   /** job name (run sessions: webpi-<name> on the app's tmux socket) */
-  name: string;
+  name: JobName;
   /** 5-field cron (minute hour day-of-month month day-of-week) */
   schedule: string;
   /** shell command a run executes (inside tmux session webpi-<name>) */
@@ -48,7 +49,7 @@ export interface ScheduledJob {
   /** the run's tmux session is alive (visible in Live) */
   running: boolean;
   /** tmux session name a run opens */
-  session: string;
+  session: TmuxSessionName;
   /** next fire from the cron schedule, local "YYYY-MM-DD HH:mm"; null when unknown */
   next: string | null;
   /** last recorded fire, same format; null when never */
@@ -161,6 +162,10 @@ export interface UpdateResult {
 // hand-written union: it is server→client only and never parsed.
 const inputMsg = z.object({ type: z.literal('input'), data: z.string() });
 const resizeMsg = z.object({ type: z.literal('resize'), cols: z.number(), rows: z.number() });
+// attach target/id stay plain strings here on purpose: server/main.ts
+// brands them (TmuxSessionNameSchema / PiSessionIdSchema) so a bad one
+// answers an error frame ('bad target', 'no such session') instead of
+// the frame being silently dropped.
 const attachLiveMsg = z.object({ type: z.literal('attach'), mode: z.literal('live'), target: z.string() });
 const attachResumeMsg = z.object({ type: z.literal('attach'), mode: z.literal('resume'), id: z.string() });
 // Not z.discriminatedUnion('type', …): the two attach variants share the
@@ -187,9 +192,9 @@ export function parseClientMsg(raw: string): ClientMsg | null {
 }
 
 export type ServerMsg =
-  | { type: 'attached'; target: string; socket: string }
+  | { type: 'attached'; target: TmuxSessionName; socket: string }
   | { type: 'output'; data: string }
-  | { type: 'exit'; target: string }
+  | { type: 'exit'; target: TmuxSessionName }
   | { type: 'error'; message: string }
   /** the session token this socket authenticated with was dropped
    *  (logout / log out everywhere) — the terminal must not reconnect */
@@ -197,3 +202,7 @@ export type ServerMsg =
   /** the server is shutting down (SIGTERM/SIGINT) — reconnectable:
    *  unlike 'exit'/'error' the client reattaches with its usual backoff */
   | { type: 'restart' };
+
+/** Which terminal target the console has selected: a live tmux session or
+ *  a past pi session being resumed (sidebar highlight + reconnect key). */
+export type ActiveKey = `live:${TmuxSessionName}` | `resume:${PiSessionId}`;

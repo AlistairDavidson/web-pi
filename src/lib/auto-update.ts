@@ -13,7 +13,7 @@
 // (installed by hand via the button) is left alone: latest-in-range <
 // installed means no update, and auto-update never downgrades into range.
 import { execFile } from 'node:child_process';
-import type { StateDb } from './db';
+import { databaseUpdate, type StateDb } from './db';
 import type { AutoUpdateCheck, AutoUpdateResult } from './types';
 import { PI_PACKAGE, npmPath, piDeclared, piInstalled, runPiUpdate } from './settings';
 
@@ -136,8 +136,8 @@ export function autoUpdateEnabled(db: StateDb): boolean {
   catch { return false; }
 }
 
-export function setAutoUpdateEnabled(db: StateDb, on: boolean): void {
-  db.setSetting(KEY_ENABLED, on ? '1' : '0');
+export function setAutoUpdateEnabled(db: StateDb, on: boolean) {
+  return databaseUpdate('could not save the setting', () => db.setSetting(KEY_ENABLED, on ? '1' : '0'));
 }
 
 export function lastCheck(db: StateDb): AutoUpdateCheck | null {
@@ -199,26 +199,23 @@ export async function performAutoUpdateCheck(deps: CheckDeps): Promise<void> {
   // registry probe above) become workspace-side operations. The decision
   // logic (range, compare, outcomes) stays web-side; a split-aware delegate
   // replaces exactly this runPiUpdate call — e.g. forward the spec to the
-  // workspace container and relay its UpdateResult back. Not implemented:
+  // workspace container and relay its PiUpdateResult back. Not implemented:
   // single-process today; see also the sibling note in settings.ts.
   console.log(`pi auto-update: ${latest} is newer than ${installed ?? 'nothing'} — installing within ${declared}`);
-  await new Promise<void>(resolve =>
-    runPiUpdate(appRoot, false, r => {
-      writeJsonSetting(db, KEY_LAST_UPDATE, {
-        at: Date.now(),
-        ok: r.ok,
-        before: r.before,
-        after: r.after,
-        detail: r.ok
-          ? `pi ${r.before ?? 'not installed'} → ${r.after ?? 'not installed'} (within ${declared})`
-          : (r.error ?? 'install failed'),
-        output: (r.output ?? '').slice(-OUTPUT_CAP),
-      } satisfies AutoUpdateResult);
-      saveCheck(db, r.ok ? 'installed' : 'failed', r.ok
-        ? `installed pi ${r.after ?? '?'} (within ${declared})`
-        : `install of ${latest} failed: ${r.error ?? 'npm error'}`);
-      resolve();
-    }, spec));
+  const r = await runPiUpdate(appRoot, false, spec);
+  writeJsonSetting(db, KEY_LAST_UPDATE, {
+    at: Date.now(),
+    ok: r.ok,
+    before: r.data.before,
+    after: r.data.after,
+    detail: r.ok
+      ? `pi ${r.data.before ?? 'not installed'} → ${r.data.after ?? 'not installed'} (within ${declared})`
+      : r.errorMessage,
+    output: r.data.output.slice(-OUTPUT_CAP),
+  } satisfies AutoUpdateResult);
+  saveCheck(db, r.ok ? 'installed' : 'failed', r.ok
+    ? `installed pi ${r.data.after ?? '?'} (within ${declared})`
+    : `install of ${latest} failed: ${r.errorMessage}`);
 }
 
 // ---------- the periodic wiring ----------
@@ -275,11 +272,14 @@ export class AutoUpdater {
   }
 
   /** The toggle endpoint: persist, then rewire. ON arms the probe (a
-   *  first check within firstDelayMs); OFF stops everything. */
-  setEnabled(on: boolean): void {
-    setAutoUpdateEnabled(this.deps.db, on);
+   *  first check within firstDelayMs); OFF stops everything. A failed
+   *  save leaves the timers as they were. */
+  setEnabled(on: boolean) {
+    const saved = setAutoUpdateEnabled(this.deps.db, on);
+    if (!saved.ok) return saved;
     this.stop();
     if (on) this.armProbe();
+    return saved;
   }
 
   private armProbe(): void {

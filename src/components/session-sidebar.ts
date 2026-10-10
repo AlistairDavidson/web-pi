@@ -5,7 +5,7 @@
 // input state (new-name value/focus; search value/focus/caret) is captured
 // before the swap and re-applied after, and typing only re-renders the
 // session list — never a stateful wa-* component lives in here.
-import type { ConsoleState, LiveSession, PastSession } from '../lib/types';
+import type { ActiveKey, ConsoleState, LiveSession, PastSession } from '../lib/types';
 import '@awesome.me/webawesome/dist/components/input/input.js';
 import '@awesome.me/webawesome/dist/components/button/button.js';
 import '@awesome.me/webawesome/dist/components/badge/badge.js';
@@ -33,11 +33,11 @@ function caretOf(el: WaInputLike): number | null {
 }
 
 export class SessionSidebar extends HTMLElement {
-  private activeKey: string | null = null;
+  private activeKey: ActiveKey | null = null;
   private state: ConsoleState | null = null;
   private search = '';
 
-  render(st: ConsoleState, activeKey: string | null): void {
+  render(st: ConsoleState, activeKey: ActiveKey | null): void {
     this.activeKey = activeKey;
     this.state = st;
     // Preserve in-progress typing + focus across the 15s poll re-render.
@@ -155,7 +155,7 @@ export class SessionSidebar extends HTMLElement {
   }
 
   private liveItem(s: LiveSession): string {
-    const key = `live:${s.name}`;
+    const key: ActiveKey = `live:${s.name}`;
     const cls = key === this.activeKey ? ' class="active"' : '';
     return `<li${cls} data-live="${esc(s.name)}" data-key="${esc(key)}" data-drawer="close" ` +
       `title="attach to live tmux session (${esc(s.socket)} socket)">` +
@@ -176,7 +176,7 @@ export class SessionSidebar extends HTMLElement {
         html += `<li class="group"><wa-icon name="folder"></wa-icon>` +
           `<span class="t-name">${esc(s.cwd)}</span></li>`;
       }
-      const key = `resume:${s.id}`;
+      const key: ActiveKey = `resume:${s.id}`;
       const cls = key === this.activeKey ? ' class="active"' : '';
       html += `<li${cls} data-resume="${esc(s.id)}" data-key="${esc(key)}" data-drawer="close" ` +
         `title="resume (pi --session — appends, history preserved)">` +

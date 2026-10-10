@@ -25,9 +25,11 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import { ENV, RAW_ENV } from './env';
 import type { LiveSession } from './types';
+import type { ResultFailure, ResultSuccess } from '../types/result';
+import { asTmuxSessionName, type JobName, type PiSessionId, type TmuxSessionName } from '../types/branded';
+import { TMUX_SESSION_NAME_RE } from '../schemas/patterns';
 
 export const SOCKET = ENV.WEB_PI_TMUX_SOCKET;
-export const NAME_RE = /^[a-zA-Z0-9_-]{1,40}$/;
 
 // In-project tmux config, applied when the tmux server starts. `-f` is read
 // at server start only; carrying it on every call is a no-op afterwards and
@@ -43,19 +45,20 @@ if (RAW_ENV.WEB_PI_TMUX_CONF && !fs.existsSync(CONF)) {
  *  bits — sessions started within about a minute of each other share their
  *  first 8 hex chars, and a truncated name attached the second one's resume
  *  to the first one's running pi. Ids too long (or not tmux-safe) for
- *  NAME_RE get a hash of the id instead. */
-export function resumeSessionName(id: string): string {
+ *  TMUX_SESSION_NAME_RE get a hash of the id instead. */
+export function resumeSessionName(id: PiSessionId): TmuxSessionName {
   const name = `r-${id}`;
-  return NAME_RE.test(name) ? name : `r-${createHash('sha256').update(id).digest('hex').slice(0, 32)}`;
+  return asTmuxSessionName(TMUX_SESSION_NAME_RE.test(name)
+    ? name : `r-${createHash('sha256').update(id).digest('hex').slice(0, 32)}`);
 }
 
 /** Session name a scheduled job's run opens on this socket (src/lib/jobs.ts
- *  fires runs under it; the Live list shows it like any session). */
-export function jobSessionName(job: string): string {
-  return `webpi-${job}`;
+ *  fires runs under it; the Live list shows it like any session). Always a
+ *  valid session name: JOB_NAME_RE caps names at 40, 'webpi-' + 40 = 46
+ *  fits TMUX_SESSION_NAME_RE's 64 (unit-tested). */
+export function jobSessionName(job: JobName): TmuxSessionName {
+  return asTmuxSessionName(`webpi-${job}`);
 }
-
-type Cb<T> = (err: Error | null, out: T) => void;
 
 /** tmux socket-selection args: `-S <path>` for an absolute path (the
  *  split shape — one socket shared across uids/containers), `-L <name>`
@@ -76,6 +79,8 @@ export function forksServer(socket: string): boolean {
  *  by /api/new (503) and the terminal WS error path. */
 export const SERVER_NOT_RUNNING_MSG = 'workspace tmux server not running';
 
+type TmuxError = Error & { stderr?: string | Buffer };
+
 /** Did a list-sessions probe fail because there is no server behind the
  *  socket (as opposed to an alive-but-sessionless server answering)?
  *  Pure decision half of the never-fork guard, unit-tested.
@@ -85,17 +90,31 @@ export const SERVER_NOT_RUNNING_MSG = 'workspace tmux server not running';
  *  only answer with sessions or the `no sessions` error. Anything else
  *  (a hung timeout, permission denied on the socket) also reads as down:
  *  refusing is always safe, forking never is. */
-export function isServerDown(err: (Error & { stderr?: string | Buffer }) | null): boolean {
+export function isServerDown(err: TmuxError | null): boolean {
   if (!err) return false;
   const se = typeof err.stderr === 'string' ? err.stderr
     : err.stderr === undefined || err.stderr === null ? '' : err.stderr.toString('utf8');
   return !se.includes('no sessions');
 }
 
+// ---------- results ----------
+
+export type TmuxServerData = { socket: string };
+export type TmuxServerSuccess = ResultSuccess<'tmux_server', TmuxServerData>;
+export type TmuxServerFailure = ResultFailure<'tmux_server', TmuxServerData, 'server_not_running'>;
+
+export type TmuxSessionData = { name: TmuxSessionName };
+/** server_not_running: the never-fork guard refused (absolute socket, no
+ *  server behind it). tmux_error: tmux itself failed — for new-session
+ *  that is almost always "duplicate session" (name taken). */
+export type TmuxSessionErrorCode = 'server_not_running' | 'tmux_error';
+export type TmuxSessionSuccess = ResultSuccess<'tmux_session', TmuxSessionData>;
+export type TmuxSessionFailure = ResultFailure<'tmux_session', TmuxSessionData, TmuxSessionErrorCode>;
+
 /** Never-fork gate for EVERY path that can start a tmux server as this
  *  uid — new-session AND attach (both are forking commands in tmux):
  *  on an absolute-path socket, first confirm a server actually answers;
- *  otherwise error out instead of silently forking one as this (web) uid.
+ *  otherwise fail instead of silently forking one as this (web) uid.
  *  Relative names skip the probe entirely — fork-to-start is their
  *  documented behaviour.
  *  Residual race (accepted): the probe and the follow-up command are two
@@ -103,23 +122,34 @@ export function isServerDown(err: (Error & { stderr?: string | Buffer }) | null)
  *  nothing short of a protocol change removes that window; the probe
  *  closes the steady-state case (workspace never started / crashed long
  *  ago), which is what the split must never paper over. */
-export function requireServer(cb: (err: Error | null) => void): void {
-  if (forksServer(SOCKET)) { cb(null); return; }
-  tmux(SOCKET, ['list-sessions'], err => {
-    cb(isServerDown(err)
-      ? new Error(`${SERVER_NOT_RUNNING_MSG} on ${SOCKET} — refusing to fork one as the web user; start it on the workspace side`)
-      : null);
-  });
+export async function requireServer() {
+  const ok = { ok: true, resultType: 'tmux_server', data: { socket: SOCKET } } satisfies TmuxServerSuccess;
+  if (forksServer(SOCKET)) return ok;
+  const { error } = await tmux(SOCKET, ['list-sessions']);
+  if (isServerDown(error)) {
+    return {
+      ok: false,
+      resultType: 'tmux_server',
+      data: { socket: SOCKET },
+      errorCode: 'server_not_running',
+      errorMessage: `${SERVER_NOT_RUNNING_MSG} on ${SOCKET} — refusing to fork one as the web user; start it on the workspace side`,
+    } satisfies TmuxServerFailure;
+  }
+  return ok;
 }
 
-function tmux(socket: string, args: string[], cb: (err: Error | null, stdout: string) => void,
-  env?: Record<string, string>): void {
+/** One tmux call. Never rejects: the error (with tmux's stderr) is part
+ *  of the answer — callers decide what it means. */
+function tmux(socket: string, args: string[], env?: Record<string, string>):
+  Promise<{ error: TmuxError | null; stdout: string }> {
   const conf = fs.existsSync(CONF) ? ['-f', CONF] : [];
-  execFile('tmux', [...conf, ...socketArgs(socket), ...args],
-    { timeout: 5000, ...(env ? { env: Object.assign({}, process.env, env) } : {}) },
-    (err, stdout) => {
-      cb(err instanceof Error ? err : null, typeof stdout === 'string' ? stdout : '');
-    });
+  return new Promise(resolve => {
+    execFile('tmux', [...conf, ...socketArgs(socket), ...args],
+      { timeout: 5000, ...(env ? { env: Object.assign({}, process.env, env) } : {}) },
+      (err, stdout) => {
+        resolve({ error: err instanceof Error ? err : null, stdout: typeof stdout === 'string' ? stdout : '' });
+      });
+  });
 }
 
 /** `-e NAME=value` args for new-session: per-session environment, so the
@@ -129,60 +159,78 @@ function envArgs(env: Record<string, string>): string[] {
   return Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
 }
 
-/** Live sessions on the app socket. [] on error/no server yet. */
-export function listSessions(cb: Cb<LiveSession[]>): void {
-  tmux(SOCKET, ['list-sessions'], (err, stdout) => {
-    if (err) { cb(null, []); return; }
-    const out: LiveSession[] = [];
-    for (const line of stdout.split('\n')) {
-      const m = line.match(/^([^:]+): (\d+) windows \(created ([^)]+)\)(.*)$/);
-      if (m) {
-        out.push({
-          name: m[1] ?? '', windows: parseInt(m[2] ?? '1', 10), created: m[3] ?? '',
-          attached: (m[4] ?? '').includes('(attached)'), socket: SOCKET,
-        });
-      }
-    }
-    cb(null, out);
-  });
+function sessionFailure(name: TmuxSessionName, server: TmuxServerFailure) {
+  return {
+    ok: false,
+    resultType: 'tmux_session',
+    data: { name },
+    errorCode: server.errorCode,
+    errorMessage: server.errorMessage ?? SERVER_NOT_RUNNING_MSG,
+  } satisfies TmuxSessionFailure;
 }
 
-export function hasSession(name: string, cb: Cb<boolean>): void {
-  if (!NAME_RE.test(name)) { cb(null, false); return; }
-  tmux(SOCKET, ['has-session', '-t', name], err => cb(null, !err));
+function tmuxFailure(name: TmuxSessionName, what: string, error: TmuxError) {
+  return {
+    ok: false,
+    resultType: 'tmux_session',
+    data: { name },
+    errorCode: 'tmux_error',
+    errorMessage: `tmux ${what} failed: ${error.message}`,
+  } satisfies TmuxSessionFailure;
+}
+
+/** Live sessions on the app socket. Can't fail by design: no server yet
+ *  (or any error) is simply no live sessions. */
+export async function listSessions(): Promise<LiveSession[]> {
+  const { error, stdout } = await tmux(SOCKET, ['list-sessions']);
+  if (error) return [];
+  const out: LiveSession[] = [];
+  for (const line of stdout.split('\n')) {
+    const m = line.match(/^([^:]+): (\d+) windows \(created ([^)]+)\)(.*)$/);
+    if (m) {
+      out.push({
+        name: asTmuxSessionName(m[1] ?? ''), windows: parseInt(m[2] ?? '1', 10), created: m[3] ?? '',
+        attached: (m[4] ?? '').includes('(attached)'), socket: SOCKET,
+      });
+    }
+  }
+  return out;
+}
+
+/** Does the session exist? Can't fail by design: any tmux error reads as
+ *  "no such session". */
+export async function hasSession(name: TmuxSessionName): Promise<boolean> {
+  const { error } = await tmux(SOCKET, ['has-session', '-t', name]);
+  return !error;
 }
 
 /** Start a session running the configured command (default: vendored pi).
  *  Never-fork guard first on absolute sockets (see requireServer). */
-export function newSession(name: string, cwd: string, command: string[],
-  env: Record<string, string>, cb: (err: Error | null) => void): void {
-  if (!NAME_RE.test(name)) { cb(new Error('invalid session name')); return; }
-  requireServer(err => {
-    if (err) { cb(err); return; }
-    tmux(SOCKET, ['new-session', '-d', '-s', name, '-c', cwd, ...envArgs(env), '--', ...command],
-      err2 => cb(err2), env);
-  });
+export async function newSession(name: TmuxSessionName, cwd: string, command: string[],
+  env: Record<string, string>) {
+  const server = await requireServer();
+  if (!server.ok) return sessionFailure(name, server);
+  const { error } = await tmux(SOCKET,
+    ['new-session', '-d', '-s', name, '-c', cwd, ...envArgs(env), '--', ...command], env);
+  if (error) return tmuxFailure(name, 'new-session', error);
+  return { ok: true, resultType: 'tmux_session', data: { name } } satisfies TmuxSessionSuccess;
 }
 
 /** Start (or reuse) a resume session; the caller then attaches. The
  *  create branch carries the same never-fork guard as newSession. */
-export function resumeSession(shortName: string, cwd: string, command: string[],
-  sessionId: string, env: Record<string, string>, cb: (err: Error | null) => void): void {
-  hasSession(shortName, (err, exists) => {
-    if (err) { cb(err); return; }
-    if (exists) { cb(null); return; }
-    requireServer(err2 => {
-      if (err2) { cb(err2); return; }
-      tmux(SOCKET,
-        ['new-session', '-d', '-s', shortName, '-c', cwd, ...envArgs(env), '--', ...command, '--session', sessionId],
-        e3 => cb(e3), env);
-    });
-  });
+export async function resumeSession(name: TmuxSessionName, cwd: string, command: string[],
+  sessionId: PiSessionId, env: Record<string, string>) {
+  const ok = { ok: true, resultType: 'tmux_session', data: { name } } satisfies TmuxSessionSuccess;
+  if (await hasSession(name)) return ok;
+  const server = await requireServer();
+  if (!server.ok) return sessionFailure(name, server);
+  const { error } = await tmux(SOCKET,
+    ['new-session', '-d', '-s', name, '-c', cwd, ...envArgs(env), '--', ...command, '--session', sessionId], env);
+  if (error) return tmuxFailure(name, 'new-session', error);
+  return ok;
 }
 
 /** Sessions alive on the app socket, as a name set (job state checks). */
-export function liveSessionNames(cb: Cb<Set<string>>): void {
-  listSessions((err, live) => {
-    cb(err, new Set(live.map(s => s.name)));
-  });
+export async function liveSessionNames(): Promise<Set<TmuxSessionName>> {
+  return new Set((await listSessions()).map(s => s.name));
 }
