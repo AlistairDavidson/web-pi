@@ -119,7 +119,10 @@ test('absolute socket: 503 + no fork while the workspace server is down; session
     const wsErr = await new Promise<string | null>(resolve => {
       // undici's WebSocket: extra handshake headers ride the options'
       // `headers` object (its `origin` option is not the Origin header).
-      const w = new WebSocket(`ws://127.0.0.1:${PORT}/ws`, { headers: { origin: BASE, cookie } });
+      // (The DOM lib's WebSocket type doesn't know undici's options form.)
+      const UndiciWebSocket = WebSocket as unknown as
+        new (url: string, init: { headers: Record<string, string> }) => WebSocket;
+      const w = new UndiciWebSocket(`ws://127.0.0.1:${PORT}/ws`, { headers: { origin: BASE, cookie } });
       const done = (v: string | null): void => { try { w.close(); } catch { /* closing */ } resolve(v); };
       w.onopen = () => w.send(JSON.stringify({ type: 'attach', mode: 'resume', id: sid }));
       w.onmessage = ev => {
@@ -163,4 +166,4 @@ test('absolute socket: 503 + no fork while the workspace server is down; session
   } finally {
     await stop();
   }
-}, 30_000);
+});

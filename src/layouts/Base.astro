@@ -78,16 +78,16 @@ const THEME_COLOR = "#11131a";
           // duration 0: stays until dismissed. Terminal work must not be
           // interrupted by an auto-reload; the button reloads on demand,
           // and the next navigation applies the update anyway.
-          const item = toast.create("A new version of web-pi is ready.", {
-            duration: 0,
-            variant: "neutral",
-            icon: "arrows-rotate",
-          });
           const reload = document.createElement("wa-button");
           reload.size = "s";
           reload.textContent = "Reload";
           reload.addEventListener("click", () => location.reload());
-          item.append(" ", reload);
+          // create() resolves to the toast item once it is shown.
+          void toast.create("A new version of web-pi is ready.", {
+            duration: 0,
+            variant: "neutral",
+            icon: "arrows-rotate",
+          }).then((item) => item.append(" ", reload));
         });
 
         window.addEventListener("load", () => {
