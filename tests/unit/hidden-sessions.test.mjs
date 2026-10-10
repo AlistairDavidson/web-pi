@@ -1,6 +1,7 @@
 // hidden-sessions.test.mjs — hide/unhide writes answer DatabaseUpdateResult
-// (src/lib/hidden-sessions.ts via db.ts databaseUpdate): success carries the
-// row count, and a failing db is a database_error result, never a throw.
+// and the hidden-ids read a DatabaseReadResult (src/lib/hidden-sessions.ts
+// via db.ts databaseUpdate/databaseRead): success carries the row count or
+// the id set, and a failing db is a database_error result, never a throw.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
@@ -16,16 +17,22 @@ function freshDb() {
   return new StateDb(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'webpi-hidden-')), 'webpi.db'));
 }
 
-test('hide / unhide / unhideAll succeed with database_update results', () => {
+test('hide / unhide / unhideAll succeed with database_update results; hiddenIds reads them back', () => {
   const hidden = new HiddenSessions(freshDb());
+  const ids = () => {
+    const r = hidden.hiddenIds();
+    assert.equal(r.ok, true, r.errorMessage);
+    assert.equal(r.resultType, 'database_read');
+    return [...r.data.value].sort();
+  };
+  assert.deepEqual(ids(), []);
   assert.deepEqual(hidden.hide(A), { ok: true, resultType: 'database_update', data: { changes: 1 } });
   assert.equal(hidden.hide(B).ok, true);
-  assert.equal(hidden.has(A), true);
-  assert.equal(hidden.size, 2);
+  assert.deepEqual(ids(), [A, B]);
   assert.deepEqual(hidden.unhide(A), { ok: true, resultType: 'database_update', data: { changes: 1 } });
-  assert.equal(hidden.has(A), false);
+  assert.deepEqual(ids(), [B]);
   assert.equal(hidden.unhideAll().ok, true);
-  assert.equal(hidden.size, 0);
+  assert.deepEqual(ids(), []);
 });
 
 test('a db that cannot open answers database_error — no throw', () => {
@@ -39,4 +46,9 @@ test('a db that cannot open answers database_error — no throw', () => {
     assert.equal(r.errorCode, 'database_error');
     assert.match(r.errorMessage, /^could not save hidden state: /);
   }
+  const read = hidden.hiddenIds();
+  assert.equal(read.ok, false);
+  assert.equal(read.resultType, 'database_read');
+  assert.equal(read.errorCode, 'database_error');
+  assert.match(read.errorMessage, /^could not read hidden state: /);
 });

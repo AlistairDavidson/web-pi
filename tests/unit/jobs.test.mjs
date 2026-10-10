@@ -11,24 +11,38 @@ import { checkCron, isDue, nextFireMs } from '../../dist-server/src/lib/jobs.js'
 const L = (y, mo, d, h, mi) => new Date(y, mo - 1, d, h, mi, 0, 0).getTime();
 const MIN = 60_000;
 
+/** nextFireMs's fire time, asserting success. */
+const at = (schedule, afterMs) => {
+  const r = nextFireMs(schedule, afterMs);
+  assert.equal(r.ok, true, r.errorMessage);
+  return r.data.at;
+};
+
 test('nextFireMs returns the next match strictly after the reference', () => {
   const t = L(2026, 10, 9, 10, 0); // exactly on a */5 boundary
-  assert.equal(nextFireMs('*/5 * * * *', t), L(2026, 10, 9, 10, 5));
-  assert.equal(nextFireMs('*/5 * * * *', t + 1), L(2026, 10, 9, 10, 5));
-  assert.equal(nextFireMs('*/5 * * * *', L(2026, 10, 9, 10, 2)), L(2026, 10, 9, 10, 5));
+  assert.equal(at('*/5 * * * *', t), L(2026, 10, 9, 10, 5));
+  assert.equal(at('*/5 * * * *', t + 1), L(2026, 10, 9, 10, 5));
+  assert.equal(at('*/5 * * * *', L(2026, 10, 9, 10, 2)), L(2026, 10, 9, 10, 5));
   // day-of-week: Mon..Fri at 09:30
   const mon = L(2026, 10, 5, 9, 30); // a Monday
-  assert.equal(nextFireMs('30 9 * * 1-5', mon), L(2026, 10, 6, 9, 30));
+  assert.equal(at('30 9 * * 1-5', mon), L(2026, 10, 6, 9, 30));
   const fri = L(2026, 10, 9, 9, 30); // a Friday
-  assert.equal(nextFireMs('30 9 * * 1-5', fri), L(2026, 10, 12, 9, 30)); // skips the weekend
+  assert.equal(at('30 9 * * 1-5', fri), L(2026, 10, 12, 9, 30)); // skips the weekend
   // month/day boundaries roll over
-  assert.equal(nextFireMs('0 8 1 * *', L(2026, 10, 31, 23, 59)), L(2026, 11, 1, 8, 0));
+  assert.equal(at('0 8 1 * *', L(2026, 10, 31, 23, 59)), L(2026, 11, 1, 8, 0));
 });
 
-test('nextFireMs throws on invalid schedules', () => {
+test('nextFireMs: invalid_schedule on invalid schedules, with an actionable message', () => {
   for (const bad of ['daily 08:00', '99 * * * *', '* * *', '']) {
-    assert.throws(() => nextFireMs(bad, L(2026, 10, 9, 10, 0)), undefined, bad);
+    const r = nextFireMs(bad, L(2026, 10, 9, 10, 0));
+    assert.equal(r.errorCode, 'invalid_schedule', bad);
+    assert.ok(r.errorMessage && !r.errorMessage.includes('\n'), bad);
   }
+  assert.match(nextFireMs('* * *', 0).errorMessage, /^schedule must be 5 cron fields/);
+});
+
+test('isDue: an invalid schedule is never due', () => {
+  assert.equal(isDue('99 * * * *', 0, L(2030, 1, 1, 0, 0)), false);
 });
 
 test('isDue: not due before the next fire, due at/after it', () => {

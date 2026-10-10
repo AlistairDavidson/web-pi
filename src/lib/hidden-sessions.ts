@@ -4,24 +4,25 @@
 // `sessions` overlay table (hidden_at set = hidden; src/lib/db.ts) and can
 // be unhidden again — unhide just NULLs the flag, since the row may later
 // carry other per-session metadata. pi's session files themselves are
-// never touched. Writes answer a DatabaseUpdateResult so the API can 500
-// instead of lying. Ids arrive branded (validated at the request boundary
-// by PiSessionIdSchema).
-import { databaseUpdate, type StateDb } from './db';
-import type { PiSessionId } from '../types/branded';
+// never touched. Reads and writes answer Results (database_read /
+// database_update) so the API can 500 instead of lying. Ids arrive branded
+// (validated at the request boundary by PiSessionIdSchema).
+import { databaseRead, databaseUpdate, type StateDb } from './db';
+import { asPiSessionId, type PiSessionId } from '../types/branded';
 
 const SAVE_FAILED = 'could not save hidden state';
 
 export class HiddenSessions {
   constructor(private state: StateDb) {}
 
-  get size(): number {
-    return (this.state.stmt('SELECT COUNT(*) AS n FROM sessions WHERE hidden_at IS NOT NULL')
-      .get() as { n: number }).n;
-  }
-  has(id: PiSessionId): boolean {
-    return this.state.stmt('SELECT 1 FROM sessions WHERE session_id = ? AND hidden_at IS NOT NULL')
-      .get(id) !== undefined;
+  /** Every hidden session id — including ones beyond the sidebar's
+   *  newest-sessions cap, so its size is the full hidden count. Ids come
+   *  from our own db, validated on write (trusted). */
+  hiddenIds() {
+    return databaseRead('could not read hidden state', () => new Set(
+      (this.state.stmt('SELECT session_id FROM sessions WHERE hidden_at IS NOT NULL')
+        .all() as Array<{ session_id: string }>)
+        .map(r => asPiSessionId(r.session_id))));
   }
   hide(id: PiSessionId) {
     return databaseUpdate(SAVE_FAILED, () =>

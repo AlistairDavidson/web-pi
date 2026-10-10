@@ -17,7 +17,7 @@
 // passed as argv elements to execFile: never through a server-side
 // shell. argv-array spawns only.
 import { CronExpressionParser } from 'cron-parser';
-import type { StateDb } from './db';
+import { databaseRead, databaseUpdate, type StateDb } from './db';
 import type { CalendarCheck, JobsState, ScheduledJob } from './types';
 import { hasSession, jobSessionName, liveSessionNames, newSession } from './tmux';
 import type { ResultFailure, ResultSuccess } from '../types/result';
@@ -46,8 +46,10 @@ export type DeleteJobResult = DeleteJobSuccess | DeleteJobFailure;
 
 export type RunJobData = { name: JobName; session: TmuxSessionName };
 /** run_active: the previous run's session is still alive (409).
- *  tmux_error: the run session could not be opened. */
-export type RunJobErrorCode = 'job_not_found' | 'run_active' | 'tmux_error';
+ *  tmux_error: the run session could not be opened. database_error: the
+ *  job could not be read, or the fire could not be recorded (and so was
+ *  not spawned). */
+export type RunJobErrorCode = 'job_not_found' | 'run_active' | 'tmux_error' | 'database_error';
 export type RunJobSuccess = ResultSuccess<'run_job', RunJobData>;
 export type RunJobFailure = ResultFailure<'run_job', RunJobData, RunJobErrorCode>;
 export type RunJobResult = RunJobSuccess | RunJobFailure;
@@ -57,23 +59,35 @@ export type ListJobsSuccess = ResultSuccess<'list_jobs', JobsState>;
 export type ListJobsFailure = ResultFailure<'list_jobs', JobsState, ListJobsErrorCode>;
 export type ListJobsResult = ListJobsSuccess | ListJobsFailure;
 
+/** at: epoch ms of the fire. */
+export type NextFireData = { at: number };
+export type NextFireErrorCode = 'invalid_schedule';
+export type NextFireSuccess = ResultSuccess<'next_fire', NextFireData>;
+export type NextFireFailure = ResultFailure<'next_fire', NextFireData, NextFireErrorCode>;
+export type NextFireResult = NextFireSuccess | NextFireFailure;
+
 // ---------- cron computation (pure — unit-tested with a fake now) ----------
 // cron-parser takes 6/7-field expressions and even an empty string; the
 // jobs UI is 5-field cron only, so the field count is enforced here first.
 
-/** Epoch ms of the next fire STRICTLY AFTER afterMs. cron-parser's next()
- *  never returns currentDate itself, so a fire at exactly the boundary is
- *  not counted twice. Fields are interpreted in the server's local time.
- *  Throws on an invalid schedule — including a field count other than 5:
- *  cron-parser would happily take 6/7-field (and shorter) expressions,
- *  but the jobs UI is 5-field cron only. */
-export function nextFireMs(schedule: string, afterMs: number): number {
+/** The next fire STRICTLY AFTER afterMs. cron-parser's next() never
+ *  returns currentDate itself, so a fire at exactly the boundary is not
+ *  counted twice. Fields are interpreted in the server's local time.
+ *  invalid_schedule — including a field count other than 5: cron-parser
+ *  would happily take 6/7-field (and shorter) expressions, but the jobs UI
+ *  is 5-field cron only. The boundary for cron-parser's throws. */
+export function nextFireMs(schedule: string, afterMs: number) {
+  const fail = (errorMessage: string) =>
+    ({ ok: false, resultType: 'next_fire', errorCode: 'invalid_schedule', errorMessage }) satisfies NextFireFailure;
   const fields = schedule.trim().split(/\s+/).filter(Boolean);
-  if (fields.length !== 5) {
-    throw new Error('schedule must be 5 cron fields: minute hour day-of-month month day-of-week');
+  if (fields.length !== 5) return fail('schedule must be 5 cron fields: minute hour day-of-month month day-of-week');
+  try {
+    const at = CronExpressionParser.parse(fields.join(' '), { currentDate: new Date(afterMs) })
+      .next().getTime();
+    return { ok: true, resultType: 'next_fire', data: { at } } satisfies NextFireSuccess;
+  } catch (err) {
+    return fail(cronError(err));
   }
-  return CronExpressionParser.parse(fields.join(' '), { currentDate: new Date(afterMs) })
-    .next().getTime();
 }
 
 /** Is a run due at nowMs, given the job's last fire (or its creation,
@@ -82,9 +96,11 @@ export function nextFireMs(schedule: string, afterMs: number): number {
  *  of latency) and boot catch-up after downtime: any number of missed
  *  windows collapses into this one boolean, and firing re-records
  *  last-fired, so catch-up is ONE run per job per downtime — systemd's
- *  Persistent=true semantics, minus the pile-up. */
+ *  Persistent=true semantics, minus the pile-up. Can't fail by design: an
+ *  invalid schedule is never due (the tick skips such rows the same way). */
 export function isDue(schedule: string, referenceMs: number, nowMs: number): boolean {
-  return nextFireMs(schedule, referenceMs) <= nowMs;
+  const next = nextFireMs(schedule, referenceMs);
+  return next.ok && next.data.at <= nowMs;
 }
 
 /** One actionable line out of a cron-parser rejection. */
@@ -112,11 +128,9 @@ export function checkCron(spec: string, nowMs: number = Date.now()): CalendarChe
   if (s.length > MAX_SCHEDULE || /[\r\n]/.test(s)) {
     return { valid: false, next: null, error: 'invalid schedule (too long or multi-line)', validatedBy: by };
   }
-  try {
-    return { valid: true, next: formatFire(nextFireMs(s, nowMs)), error: null, validatedBy: by };
-  } catch (err) {
-    return { valid: false, next: null, error: cronError(err), validatedBy: by };
-  }
+  const next = nextFireMs(s, nowMs);
+  if (!next.ok) return { valid: false, next: null, error: next.errorMessage, validatedBy: by };
+  return { valid: true, next: formatFire(next.data.at), error: null, validatedBy: by };
 }
 
 // ---------- scheduler ----------
@@ -161,79 +175,100 @@ export class Scheduler {
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
   }
 
+  // The db boundary: every sqlite call the scheduler makes goes through
+  // these (or saveJob/deleteJob's own catch), so a lock timeout or a
+  // deleted state db comes back as a database_error result, never a throw.
   // Row reads: names come from our own db, validated on write (trusted).
-  private rows(): JobRow[] {
-    return (this.db.stmt('SELECT name, schedule, command, created_at FROM jobs ORDER BY name')
-      .all() as unknown as Array<Omit<JobRow, 'name'> & { name: string }>)
-      .map(r => ({ ...r, name: asJobName(r.name) }));
+  private rows() {
+    return databaseRead('could not read jobs', (): JobRow[] =>
+      (this.db.stmt('SELECT name, schedule, command, created_at FROM jobs ORDER BY name')
+        .all() as unknown as Array<Omit<JobRow, 'name'> & { name: string }>)
+        .map(r => ({ ...r, name: asJobName(r.name) })));
   }
 
-  private row(name: JobName): JobRow | undefined {
-    const r = this.db.stmt('SELECT name, schedule, command, created_at FROM jobs WHERE name = ?')
-      .get(name) as unknown as (Omit<JobRow, 'name'> & { name: string }) | undefined;
-    return r && { ...r, name: asJobName(r.name) };
+  private row(name: JobName) {
+    return databaseRead('could not read job', (): JobRow | undefined => {
+      const r = this.db.stmt('SELECT name, schedule, command, created_at FROM jobs WHERE name = ?')
+        .get(name) as unknown as (Omit<JobRow, 'name'> & { name: string }) | undefined;
+      return r && { ...r, name: asJobName(r.name) };
+    });
   }
 
-  private lastFired(name: JobName): number | null {
-    const r = this.db.stmt('SELECT MAX(fired_at) AS last FROM job_runs WHERE job = ?')
-      .get(name) as { last: number | null };
-    return r.last;
+  private lastFired(name: JobName) {
+    return databaseRead('could not read job runs', () =>
+      (this.db.stmt('SELECT MAX(fired_at) AS last FROM job_runs WHERE job = ?')
+        .get(name) as { last: number | null }).last);
   }
 
-  private recordRun(name: JobName, origin: 'schedule' | 'catchup' | 'manual'): void {
-    this.db.stmt('INSERT INTO job_runs (job, fired_at, origin) VALUES (?, ?, ?)')
-      .run(name, Date.now(), origin);
-    this.db.stmt(`DELETE FROM job_runs WHERE job = ? AND fired_at NOT IN
-                  (SELECT fired_at FROM job_runs WHERE job = ? ORDER BY fired_at DESC LIMIT ?)`)
-      .run(name, name, RUN_HISTORY);
+  private recordRun(name: JobName, origin: 'schedule' | 'catchup' | 'manual') {
+    return databaseUpdate('could not record the run', () => {
+      const inserted = this.db.stmt('INSERT INTO job_runs (job, fired_at, origin) VALUES (?, ?, ?)')
+        .run(name, Date.now(), origin);
+      this.db.stmt(`DELETE FROM job_runs WHERE job = ? AND fired_at NOT IN
+                    (SELECT fired_at FROM job_runs WHERE job = ? ORDER BY fired_at DESC LIMIT ?)`)
+        .run(name, name, RUN_HISTORY);
+      return inserted;
+    });
   }
 
   private async tick(): Promise<void> {
     if (this.ticking) return; // a slow tmux call must not stack ticks
     this.ticking = true;
+    // A db failure ends the tick — the next one retries.
+    const failed = (errorMessage: string): void => console.error(`scheduler tick failed: ${errorMessage}`);
     try {
       const rows = this.rows();
+      if (!rows.ok) { failed(rows.errorMessage); return; }
       const live = await liveSessionNames();
       const now = Date.now();
-      for (const row of rows) {
+      for (const row of rows.data.value) {
         // Concurrency: a job whose previous run's tmux session is still
         // alive is skipped — long-running agent jobs don't pile up.
         if (live.has(jobSessionName(row.name))) continue;
-        const reference = this.lastFired(row.name) ?? row.created_at;
-        let dueAt: number;
-        try {
-          dueAt = nextFireMs(row.schedule, reference);
-        } catch {
+        const last = this.lastFired(row.name);
+        if (!last.ok) { failed(last.errorMessage); return; }
+        const reference = last.data.value ?? row.created_at;
+        const next = nextFireMs(row.schedule, reference);
+        if (!next.ok) {
           if (!this.warned.has(row.name)) {
             this.warned.add(row.name);
             console.warn(`job ${row.name}: stored schedule "${row.schedule}" does not parse — skipped until re-saved`);
           }
           continue;
         }
+        const dueAt = next.data.at;
         if (dueAt <= now) {
           // Boot catch-up equivalent of Persistent=true: whatever windows
           // were missed, this fires ONCE — the recorded fire below resets
           // the reference past all of them.
-          await this.fire(row, now - dueAt > CATCHUP_LATENESS_MS ? 'catchup' : 'schedule');
+          const fired = await this.fire(row, now - dueAt > CATCHUP_LATENESS_MS ? 'catchup' : 'schedule');
+          if (!fired.ok) {
+            switch (fired.errorCode) {
+              case 'database_error': failed(fired.errorMessage); return;
+              case 'server_not_running':
+              case 'tmux_error': break; // logged by fire(); the fire is spent
+              default: fired satisfies never;
+            }
+          }
         }
       }
     } catch (err) {
-      // A tick must never take the server (and, in the container, every
-      // tmux session with it) down: the db calls here — rows(),
-      // lastFired(), recordRun() — can throw (a lock timeout, a state db
-      // the e2e suite deletes mid-run); log and try again next tick.
-      // tmux failures come back as results from fire() and never reach this.
+      // Crash guard only (db and tmux failures come back as results): a
+      // tick must never take the server (and, in the container, every
+      // tmux session with it) down via an unhandled rejection.
       console.error('scheduler tick failed:', (err as Error)?.message ?? err);
     } finally {
       this.ticking = false;
     }
   }
 
-  /** Open the run's tmux session and record the fire. The run is recorded
-   *  FIRST: even a failed spawn must count the fire as spent, or the next
-   *  tick would retry it forever. */
+  /** Record the fire, then open the run's tmux session. The run is
+   *  recorded FIRST: even a failed spawn must count the fire as spent, or
+   *  the next tick would retry it forever — so a fire that cannot be
+   *  recorded is not spawned either. */
   private async fire(row: JobRow, origin: 'schedule' | 'catchup' | 'manual') {
-    this.recordRun(row.name, origin);
+    const recorded = this.recordRun(row.name, origin);
+    if (!recorded.ok) return recorded;
     const session = jobSessionName(row.name);
     const opened = await newSession(session, this.ctx.cwd, ['/bin/sh', '-c', row.command], this.ctx.env);
     if (!opened.ok) console.error(`job ${row.name}: could not open run session ${session} (${opened.errorMessage})`);
@@ -243,40 +278,27 @@ export class Scheduler {
   /** List jobs: db definitions + next fire from the schedule + tmux
    *  presence for "a run is live". */
   async listJobs() {
-    let rows: JobRow[];
-    try {
-      rows = this.rows();
-    } catch (err) {
-      return {
-        ok: false, resultType: 'list_jobs', errorCode: 'database_error',
-        errorMessage: `could not list jobs: ${(err as Error).message}`,
-      } satisfies ListJobsFailure;
-    }
+    const fail = (errorMessage: string) =>
+      ({ ok: false, resultType: 'list_jobs', errorCode: 'database_error', errorMessage }) satisfies ListJobsFailure;
+    const rows = this.rows();
+    if (!rows.ok) return fail(rows.errorMessage);
     const live = await liveSessionNames();
     const now = Date.now();
     const jobs: ScheduledJob[] = [];
-    for (const row of rows) {
-      let next: string | null = null;
-      let active = true;
-      try { next = formatFire(nextFireMs(row.schedule, now)); }
-      catch { active = false; } // hand-edited db row; tick warns once
-      let last: number | null;
-      try {
-        last = this.lastFired(row.name);
-      } catch (err) {
-        return {
-          ok: false, resultType: 'list_jobs', errorCode: 'database_error',
-          errorMessage: `could not list jobs: ${(err as Error).message}`,
-        } satisfies ListJobsFailure;
-      }
+    for (const row of rows.data.value) {
+      // An invalid schedule here is a hand-edited db row; the tick warns once.
+      const nextFire = nextFireMs(row.schedule, now);
+      const lastRead = this.lastFired(row.name);
+      if (!lastRead.ok) return fail(lastRead.errorMessage);
+      const last = lastRead.data.value;
       jobs.push({
         name: row.name,
         schedule: row.schedule,
         command: row.command,
-        active,
+        active: nextFire.ok,
         running: live.has(jobSessionName(row.name)),
         session: jobSessionName(row.name),
-        next,
+        next: nextFire.ok ? formatFire(nextFire.data.at) : null,
         last: last === null ? null : formatFire(last),
         lastResult: 'unknown',
       });
@@ -340,24 +362,23 @@ export class Scheduler {
    *  scheduler fire has. */
   async runJob(name: JobName) {
     const session = jobSessionName(name);
-    const row = this.row(name);
-    if (!row) {
-      return {
-        ok: false, resultType: 'run_job', data: { name, session }, errorCode: 'job_not_found', errorMessage: 'no such job',
-      } satisfies RunJobFailure;
-    }
+    const fail = (errorCode: RunJobErrorCode, errorMessage: string) =>
+      ({ ok: false, resultType: 'run_job', data: { name, session }, errorCode, errorMessage }) satisfies RunJobFailure;
+    const found = this.row(name);
+    if (!found.ok) return fail('database_error', found.errorMessage);
+    const row = found.data.value;
+    if (!row) return fail('job_not_found', 'no such job');
     if (await hasSession(session)) {
-      return {
-        ok: false, resultType: 'run_job', data: { name, session }, errorCode: 'run_active',
-        errorMessage: 'previous run is still active — attach to it from Live, or kill it first',
-      } satisfies RunJobFailure;
+      return fail('run_active', 'previous run is still active — attach to it from Live, or kill it first');
     }
-    const opened = await this.fire(row, 'manual');
-    if (!opened.ok) {
-      return {
-        ok: false, resultType: 'run_job', data: { name, session }, errorCode: 'tmux_error',
-        errorMessage: opened.errorMessage,
-      } satisfies RunJobFailure;
+    const fired = await this.fire(row, 'manual');
+    if (!fired.ok) {
+      switch (fired.errorCode) {
+        case 'database_error': return fail('database_error', fired.errorMessage);
+        case 'server_not_running':
+        case 'tmux_error': return fail('tmux_error', fired.errorMessage);
+        default: return fired satisfies never;
+      }
     }
     return { ok: true, resultType: 'run_job', data: { name, session } } satisfies RunJobSuccess;
   }

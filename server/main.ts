@@ -511,11 +511,13 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
     respond(res, async () => {
       const sessList = await listSessions(CFG.sessionsDir); // tolerates junk, never rejects
       const live = await tmux.listSessions();
+      const hidden = hiddenSessions.hiddenIds();
+      if (!hidden.ok) { sendJSON(res, 500, { error: hidden.errorMessage }); return; }
       const state: ConsoleState = {
         me: 'ok', configured: auth.configured(),
         live,
-        sessions: sessList.map(s => ({ ...s, hidden: hiddenSessions.has(s.id) })),
-        hiddenCount: hiddenSessions.size,
+        sessions: sessList.map(s => ({ ...s, hidden: hidden.data.value.has(s.id) })),
+        hiddenCount: hidden.data.value.size,
       };
       sendJSON(res, 200, state, refresh === null ? undefined : { 'Set-Cookie': refresh });
     });

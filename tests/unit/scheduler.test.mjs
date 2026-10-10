@@ -94,6 +94,23 @@ test('runJob: job_not_found; tmux_error (no server behind the socket) still spen
   assert.ok(listed.data.jobs[0].last, 'the failed run was recorded');
 });
 
+test('runJob: database_error when the job cannot be read, or its fire cannot be recorded', async () => {
+  const unread = await brokenScheduler().runJob('nightly');
+  assert.equal(unread.errorCode, 'database_error');
+  assert.match(unread.errorMessage, /^could not read job: /);
+
+  // Reads work, the run bookkeeping write doesn't: the fire is refused
+  // before any spawn (a tmux attempt would answer tmux_error instead).
+  const db = new StateDb(path.join(fs.mkdtempSync(path.join(dir, 'db-')), 'webpi.db'));
+  const s = new Scheduler(db, { cwd: dir, env: {} });
+  await s.saveJob(GOOD);
+  db.stmt('DROP TABLE job_runs').run();
+  const unrecorded = await s.runJob('nightly');
+  assert.equal(unrecorded.errorCode, 'database_error');
+  assert.match(unrecorded.errorMessage, /^could not record the run: /);
+  assert.deepEqual(unrecorded.data, { name: 'nightly', session: 'webpi-nightly' });
+});
+
 test('runJob: opens the run, then run_active while it lives; 40-char names run too', { skip: !haveTmux }, async () => {
   const conf = path.join(dir, 'server.conf');
   fs.writeFileSync(conf, 'set -g exit-empty off\n');

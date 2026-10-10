@@ -51,6 +51,29 @@ export function databaseUpdate(context: string, write: () => { changes: number |
   }
 }
 
+/** The shared "generic read" result: a query whose answer the caller
+ *  shapes itself (a row, a list, an aggregate). */
+export type DatabaseReadData<T> = { value: T };
+export type DatabaseReadErrorCode = 'database_error';
+export type DatabaseReadSuccess<T> = ResultSuccess<'database_read', DatabaseReadData<T>>;
+export type DatabaseReadFailure<T> = ResultFailure<'database_read', DatabaseReadData<T>, DatabaseReadErrorCode>;
+export type DatabaseReadResult<T> = DatabaseReadSuccess<T> | DatabaseReadFailure<T>;
+
+/** Run one read at the db boundary — databaseUpdate()'s twin for queries:
+ *  a thrown sqlite error becomes a database_error failure. */
+export function databaseRead<T>(context: string, read: () => T) {
+  try {
+    return { ok: true, resultType: 'database_read', data: { value: read() } } satisfies DatabaseReadSuccess<T>;
+  } catch (err) {
+    return {
+      ok: false,
+      resultType: 'database_read',
+      errorCode: 'database_error',
+      errorMessage: `${context}: ${(err as Error).message}`,
+    } satisfies DatabaseReadFailure<T>;
+  }
+}
+
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS credential (
     id         INTEGER PRIMARY KEY CHECK (id = 1),  -- single row
