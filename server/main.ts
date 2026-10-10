@@ -435,7 +435,9 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
       auth.verify(username, password)
         .then(ok => {
           if (!ok) { send(res, 401, 'invalid credentials'); return; }
-          send(res, 200, 'ok', { 'Set-Cookie': auth.cookieHeader(auth.newSession(), CFG.base) });
+          const session = auth.newSession();
+          if (!session.ok) { console.error(session.errorMessage); send(res, 500, 'internal error'); return; }
+          send(res, 200, 'ok', { 'Set-Cookie': auth.cookieHeader(session.data.token, CFG.base) });
         })
         .catch(e => { console.error('login verify failed', e); send(res, 500, 'internal error'); })
         .finally(() => { loginVerifying--; });
@@ -445,10 +447,17 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
 
   if (req.method === 'POST' && url === route('/logout')) {
     const token = Auth.sessionToken(req.headers.cookie);
-    auth.drop(token);
+    const dropped = auth.drop(token);
     // Logout must end the terminals this token authenticated, not just
     // future requests: they get 'signed-out' and don't reconnect.
     if (token) closeTokenSockets(token, { type: 'signed-out' });
+    // A failed delete means the token is still valid server-side: say so
+    // (the browser's cookie is cleared either way).
+    if (!dropped.ok) {
+      console.error(dropped.errorMessage);
+      send(res, 500, 'could not end the session', { 'Set-Cookie': clearSessionCookie() });
+      return;
+    }
     send(res, 200, 'ok', { 'Set-Cookie': clearSessionCookie() });
     return;
   }
@@ -494,8 +503,13 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
   // terminal ends — suspected-cookie-theft recovery in one click. This
   // browser's cookie is cleared too.
   if (req.method === 'POST' && url === route('/api/logout-all')) {
-    auth.dropAll();
+    const dropped = auth.dropAll();
     closeAllSockets({ type: 'signed-out' });
+    if (!dropped.ok) {
+      console.error(dropped.errorMessage);
+      send(res, 500, 'could not end the sessions', { 'Set-Cookie': clearSessionCookie() });
+      return;
+    }
     send(res, 200, 'ok', { 'Set-Cookie': clearSessionCookie() });
     return;
   }
