@@ -11,12 +11,7 @@ import '@awesome.me/webawesome/dist/components/button/button.js';
 import '@awesome.me/webawesome/dist/components/badge/badge.js';
 import '@awesome.me/webawesome/dist/components/icon/icon.js';
 import '@awesome.me/webawesome/dist/components/relative-time/relative-time.js';
-
-function esc(s: string): string {
-  return s.replace(/[&<>"']/g, c => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  }[c] as string));
-}
+import { esc } from './html';
 
 /** <wa-input> surface used by this component (it's form-associated). */
 interface WaInputLike extends HTMLElement {
@@ -192,4 +187,4 @@ export class SessionSidebar extends HTMLElement {
   }
 }
 
-customElements.define('session-sidebar', SessionSidebar);
+if (!customElements.get('session-sidebar')) customElements.define('session-sidebar', SessionSidebar);

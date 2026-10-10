@@ -1,4 +1,4 @@
-const VERSION = 'web-pi-v1';
+const VERSION = 'web-pi-v2'; // v2: /partials/* bypass the cache (old caches are dropped on activate)
 const SCOPE = new URL(self.registration.scope); // <origin><base>/
 const at = (p) => new URL(p, SCOPE).href;
 const PRECACHE = [
@@ -65,7 +65,10 @@ self.addEventListener('fetch', (event) => {
   const dir = SCOPE.pathname; // '<base>/'
   const rel = url.pathname.startsWith(dir) ? url.pathname.slice(dir.length) : null;
   if (rel === null) return; // outside the app's base
-  if (rel.startsWith('api/') || rel === 'ws' || rel === 'sw.js') return;
+  // Live per-user data is never served from cache: the JSON API and the
+  // server-rendered partials (fragments the pages swap in as refreshes —
+  // a stale one would undo a delete on screen).
+  if (rel.startsWith('api/') || rel.startsWith('partials/') || rel === 'ws' || rel === 'sw.js') return;
 
   if (request.mode === 'navigate') {
     event.respondWith(networkFirstNavigation(request));

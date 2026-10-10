@@ -1,0 +1,14 @@
+---
+// GET /partials/settings — the /settings dashboard as a fragment, for
+// <settings-app> to refresh its data regions from after a pi update.
+// Behind the main.ts gate (signed out: 401) and src/middleware.ts (no
+// locals: 503).
+import SettingsView from '../../components/Settings/SettingsView.astro';
+import { assertWebPiLocals } from '../../lib/web/locals';
+
+export const partial = true;
+
+const { webpi } = assertWebPiLocals(Astro.locals);
+Astro.response.headers.set('Cache-Control', 'no-store');
+---
+<SettingsView state={webpi.settingsState()} />

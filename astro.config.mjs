@@ -33,6 +33,8 @@ const pageMethodsOnly = (req) =>
   req.method === 'GET' || req.method === 'HEAD' ? req.url : undefined;
 const devProxy = {
   [`${base}api`]: { target: devApiTarget },
+  // server-rendered fragments (src/pages/partials) need the services too
+  [`${base}partials`]: { target: devApiTarget },
   [`${base}ws`]: { target: devApiTarget, ws: true },
   [`${base}login`]: { target: devApiTarget, bypass: pageMethodsOnly },
   [`${base}logout`]: { target: devApiTarget, bypass: pageMethodsOnly },

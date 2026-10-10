@@ -1,7 +1,14 @@
 ---
 import Base from '../layouts/Base.astro';
 import JobsApp from '../components/JobsApp/JobsApp.astro';
+// Server-rendered (docs/CODE_STYLE.md §7): the job list arrives as HTML
+// from the scheduler server/main.ts passes in locals; <jobs-app> enhances
+// it (actions, dialogs, a 15 s refresh from /partials/jobs-list). No
+// locals (astro dev's own render) or a failed listing → the element loads
+// the list itself.
+const listed = await Astro.locals.webpi?.scheduler.listJobs();
+const jobs = listed?.ok ? listed.data.jobs : null;
 ---
 <Base title="web-pi — jobs">
-  <JobsApp />
+  <JobsApp jobs={jobs} />
 </Base>

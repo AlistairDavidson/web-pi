@@ -16,6 +16,7 @@ import '@awesome.me/webawesome/dist/components/toast/toast.js';
 import '@awesome.me/webawesome/dist/components/relative-time/relative-time.js';
 import '../AgentTerminal/agent-terminal';
 import '../session-sidebar';
+import { esc } from '../html';
 
 /** Minimal typing for <wa-toast>.create(). */
 type WaToast = HTMLElement & {
@@ -24,12 +25,6 @@ type WaToast = HTMLElement & {
 
 /** Minimal typing for <wa-dialog>. */
 type WaDialog = HTMLElement & { show(): void; open: boolean };
-
-function esc(s: string): string {
-  return s.replace(/[&<>"']/g, c => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  }[c] as string));
-}
 
 export class ConsoleApp extends HTMLElement {
   private pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -219,4 +214,4 @@ export class ConsoleApp extends HTMLElement {
   }
 }
 
-customElements.define('console-app', ConsoleApp);
+if (!customElements.get('console-app')) customElements.define('console-app', ConsoleApp);

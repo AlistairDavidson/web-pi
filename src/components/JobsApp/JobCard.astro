@@ -1,0 +1,56 @@
+---
+// JobCard.astro — one scheduled job, server-rendered (it replaces the HTML
+// string jobs-app.ts used to build — Astro escapes every value). The
+// action buttons carry what <jobs-app> needs (data-run / data-edit /
+// data-del, and the edit button the job's fields) — the element handles
+// their clicks by delegation, so a refreshed list needs no rewiring.
+import '@awesome.me/webawesome/dist/components/button/button.js';
+import '@awesome.me/webawesome/dist/components/icon/icon.js';
+import '@awesome.me/webawesome/dist/components/card/card.js';
+import '@awesome.me/webawesome/dist/components/badge/badge.js';
+import type { ScheduledJob } from '../../lib/types';
+
+interface Props {
+  job: ScheduledJob;
+}
+const { job } = Astro.props;
+
+// Matches the server's WEB_PI_BASE ('' for root, else '/foo').
+const base = (import.meta.env.BASE_URL ?? '/').replace(/\/+$/, '');
+const last = job.last
+  ? `${job.last}${job.lastResult === 'success' ? ' · ok' : job.lastResult === 'failed' ? ' · failed' : ''}`
+  : 'never';
+---
+<wa-card class="job">
+  <div class="job-head">
+    <span class="job-name"><wa-icon name="clock"></wa-icon>{job.name}</span>
+    <span class="wa-cluster wa-gap-3xs">
+      {job.active
+        ? <wa-badge pill variant="success">scheduled</wa-badge>
+        : <wa-badge pill>invalid schedule</wa-badge>}
+      {job.running && <wa-badge pill variant="brand">running</wa-badge>}
+      {job.lastResult === 'failed' && <wa-badge pill variant="danger">last run failed</wa-badge>}
+      {job.running && (
+        <a class="job-view" href={`${base}/?live=${encodeURIComponent(job.session)}`}>view run<wa-icon name="play"></wa-icon></a>
+      )}
+    </span>
+  </div>
+  <dl class="job-meta">
+    <dt>schedule</dt><dd><code>{job.schedule || '—'}</code></dd>
+    <dt>command</dt><dd><code>{job.command || '—'}</code></dd>
+    <dt>next</dt><dd>{job.next ?? '—'}</dd>
+    <dt>last run</dt><dd>{last}</dd>
+  </dl>
+  <div class="job-actions wa-cluster wa-gap-2xs">
+    <wa-button size="s" data-run={job.name}>
+      <wa-icon slot="start" name="play"></wa-icon>run now
+    </wa-button>
+    <wa-button size="s" appearance="plain" data-edit={job.name}
+      data-schedule={job.schedule} data-command={job.command}>
+      <wa-icon slot="start" name="pencil"></wa-icon>edit
+    </wa-button>
+    <wa-button size="s" appearance="plain" variant="danger" data-del={job.name}>
+      <wa-icon slot="start" name="trash-can"></wa-icon>delete
+    </wa-button>
+  </div>
+</wa-card>

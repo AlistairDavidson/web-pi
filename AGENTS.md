@@ -85,6 +85,15 @@ upgrades in a real browser (headless Chromium via the playwright install in
   (target phase) before validation runs. A button outside the form (e.g.
   a `wa-dialog` footer) calls `form.requestSubmit()`.
 - An empty `wa-input`'s `.value` is `null`, not `''`.
+- Boolean attributes on `wa-*` in Astro markup: astro-lit renders
+  `checked={false}` as `checked="false"` and `disabled={undefined}` as
+  `disabled="undefined"`. Both are *present* attributes, which means true.
+  Spread the attribute in only when it's on (see `flag()` in
+  `SettingsView.astro`).
+- Server-rendered fragments (`/partials/*`) go into the page with
+  `parseServerHTML` (`src/components/html.ts`, which uses `setHTMLUnsafe`)
+  so SSR'd `wa-*` keep their declarative shadow DOM and hydrate. Handle
+  their events by delegation on the enhancing element.
 - **No JS, no wa-* forms:** without upgrading, a `wa-input` still renders
   (declarative shadow DOM) and accepts typing, but its input is inside the
   shadow root and has no `name`, so a native submit carries none of its

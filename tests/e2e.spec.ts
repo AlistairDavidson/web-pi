@@ -129,6 +129,10 @@ test('API routes stay guarded without a session', async ({ request }) => {
   expect((await request.get('/api/jobs')).status()).toBe(401);
   // Unknown API paths are 401 too — never the login page.
   expect((await request.get('/api/nope')).status()).toBe(401);
+  // Server-rendered partials are data routes too — never the login page
+  // (an element would swap login HTML into its list).
+  expect((await request.get('/partials/jobs-list')).status()).toBe(401);
+  expect((await request.get('/partials/settings')).status()).toBe(401);
   expect((await request.post('/api/session/hide', { data: { id: FIXTURE_A } })).status()).toBe(401);
   expect((await request.post('/api/session/unhide', { data: { id: FIXTURE_A } })).status()).toBe(401);
 });
@@ -425,7 +429,11 @@ test('jobs: validate, save, run now, delete', async ({ page }) => {
     { name: 'itest-job', schedule: '*/5 * * * *', command: 'sleep 300' });
   expect(saved.json).toMatchObject({ name: 'itest-job' });
 
-  // The /jobs page shows the job card.
+  // The /jobs page arrives with the job card server-rendered (the HTML
+  // itself, before any script runs) — and shows it.
+  const html = await page.evaluate(async () => (await fetch('/jobs')).text());
+  expect(html).toContain('itest-job');
+  expect(html).toContain('data-loaded="true"');
   await page.goto('/jobs');
   await expect(page.locator('jobs-app .job')).toHaveCount(1);
   await expect(page.locator('jobs-app .job-name')).toContainText('itest-job');
@@ -484,7 +492,16 @@ test('the jobs dialog validates against the shared schema: per-field errors, no 
   // Re-opening the dialog starts clean.
   await page.click('#jobs-new');
   await expect(page.locator('#job-name-error')).toHaveText('');
-  expect((await api(page, 'DELETE', '/api/jobs/form-check')).status).toBe(200);
+  await page.locator('#job-dialog wa-button[data-dialog="close"]').click();
+  // The card came in through the /partials/jobs-list swap: its wa-* parts
+  // hydrated once (no doubled render) and its buttons work (delegation).
+  await expect(page.locator('jobs-app .job')).toHaveCount(1);
+  expect(await page.locator('jobs-app .job wa-button[data-del="form-check"]').evaluate(
+    el => el.shadowRoot?.querySelectorAll('[part~="base"]').length)).toBe(1);
+  await page.locator('jobs-app .job wa-button[data-del="form-check"]').click();
+  await page.click('#job-delete-confirm');
+  await expect(page.locator('jobs-app .job')).toHaveCount(0);
+  await expect(page.locator('jobs-app .jobs-empty')).toContainText('no jobs yet');
 });
 
 test('jobs persist across a server restart; missed runs catch up', async () => {
@@ -1217,6 +1234,12 @@ test('auto-update setting: default OFF, toggle persists across reload, status li
   // back OFF — which cancels even that — so the shared webServer finishes
   // with nothing armed.
   await login(page);
+  // The dashboard arrives server-rendered: the config rows and the status
+  // lines are in the HTML itself, not filled in by a script.
+  const html = await page.evaluate(async () => (await fetch('/settings')).text());
+  expect(html).toContain(`${WORKSPACE}/webpi.db`);
+  expect(html).toContain('not checked yet');
+  expect(html).not.toContain('loading…');
   await page.goto('/settings');
 
   // The switch upgraded client-side (SSR ≠ client imports — AGENTS.md).

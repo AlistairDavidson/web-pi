@@ -647,6 +647,9 @@ edits and the future apply step builds from.
 - `src/pages/api` — the JSON API as thin Astro routes (parse → one
   service call → response), only reachable through the server's
   origin + session gate (`src/middleware.ts` fails closed without it)
+- `src/pages/partials` — server-rendered fragments (the jobs list, the
+  settings data) that the /jobs and /settings elements swap in to
+  refresh; same gate, never cached by the service worker
 - `src/schemas` — node-free zod schemas shared by server and browser
   (request bodies, WS frames, branded IDs); `src/types` — the `Result`
   contract and branded ID types. Conventions: `docs/CODE_STYLE.md`
