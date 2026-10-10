@@ -1,0 +1,20 @@
+---
+// GET /partials/settings — the /settings dashboard as a fragment, for
+// <settings-app> to refresh its data regions from after a pi update.
+// Behind the main.ts gate (signed out: 401) and src/middleware.ts (no
+// locals: 503). A settings_state failure answers 500 with no fragment —
+// the element keeps what it shows (like /partials/jobs-list).
+import SettingsView from '../../components/Settings/SettingsView.astro';
+import { assertWebPiLocals } from '../../lib/web/locals';
+
+export const partial = true;
+
+const { webpi } = assertWebPiLocals(Astro.locals);
+const settings = webpi.settingsState();
+Astro.response.headers.set('Cache-Control', 'no-store');
+if (!settings.ok) {
+  console.error(`settings partial: ${settings.errorMessage}`);
+  Astro.response.status = 500;
+}
+---
+{settings.ok && <SettingsView state={settings.data} />}

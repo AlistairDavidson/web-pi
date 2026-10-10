@@ -1,0 +1,21 @@
+---
+// JobsList.astro — the scheduled-jobs list, server-rendered: by the /jobs
+// page and by the partial <jobs-app> refreshes from
+// (src/pages/partials/jobs-list.astro). `jobs` is null when the listing
+// isn't available (astro dev's own render, or a db error) — the element
+// then loads the partial.
+import JobCard from './JobCard.astro';
+import type { ScheduledJob } from '../../lib/types';
+
+interface Props {
+  jobs: ScheduledJob[] | null;
+}
+const { jobs } = Astro.props;
+---
+<div id="jobs-list" class="wa-stack wa-gap-s" data-loaded={jobs ? 'true' : 'false'}>
+  {jobs === null
+    ? <p class="jobs-empty">loading…</p>
+    : jobs.length === 0
+      ? <p class="jobs-empty">no jobs yet — "new job" schedules a recurring command.</p>
+      : jobs.map(job => <JobCard job={job} />)}
+</div>

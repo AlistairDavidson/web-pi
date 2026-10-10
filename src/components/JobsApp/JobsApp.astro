@@ -7,10 +7,18 @@ import "@awesome.me/webawesome/dist/components/dialog/dialog.js";
 import "@awesome.me/webawesome/dist/components/input/input.js";
 import "@awesome.me/webawesome/dist/components/textarea/textarea.js";
 import "@awesome.me/webawesome/dist/components/toast/toast.js";
+import JobsList from "./JobsList.astro";
 import WaInputField from "../form/WaInputField.astro";
 import WaTextareaField from "../form/WaTextareaField.astro";
 import { zodSchemaToHTMLAttributes } from "../../lib/web/zod.service";
 import { JobSaveSchema } from "../../schemas/jobs";
+import type { ScheduledJob } from "../../lib/types";
+
+interface Props {
+  /** The listing, server-rendered; null when unavailable (the element loads it). */
+  jobs: ScheduledJob[] | null;
+}
+const { jobs } = Astro.props;
 
 // Native constraints matching the schema the dialog validates with
 // (client: validation-enhancer-zod in jobs-app.ts; server: POST /api/jobs).
@@ -39,7 +47,7 @@ const validation = zodSchemaToHTMLAttributes(JobSaveSchema);
       <strong>Live</strong> list and is attachable, just like a session you
       started yourself.
     </p>
-    <div id="jobs-list" class="wa-stack wa-gap-s"></div>
+    <JobsList jobs={jobs} />
   </div>
 
   <wa-dialog id="job-dialog" label="new job" with-footer>

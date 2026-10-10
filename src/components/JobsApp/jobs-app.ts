@@ -1,5 +1,11 @@
-import type { CalendarCheck, JobsState, ScheduledJob } from '../../lib/types';
+// jobs-app.ts — <jobs-app>: enhances the server-rendered /jobs page
+// (JobsApp.astro, JobsList.astro / JobCard.astro). The list arrives as
+// HTML; this element wires the actions (run / edit / delete by delegated
+// clicks — the cards carry their data), the create/edit dialog, and a 15 s
+// refresh that swaps in /partials/jobs-list.
+import type { CalendarCheck } from '../../lib/types';
 import { BASE } from '../../base';
+import { parseServerHTML } from '../html';
 import '@awesome.me/webawesome/dist/components/button/button.js';
 import '@awesome.me/webawesome/dist/components/icon/icon.js';
 import '@awesome.me/webawesome/dist/components/card/card.js';
@@ -23,11 +29,8 @@ type WaToast = HTMLElement & {
   create(message: string, options?: Record<string, unknown>): Promise<unknown>;
 };
 
-function esc(s: string): string {
-  return s.replace(/[&<>"']/g, c => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  }[c] as string));
-}
+/** What the dialog edits — read off a card's edit button. */
+interface JobFields { name: string; schedule: string; command: string }
 
 export class JobsApp extends HTMLElement {
   private pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -41,6 +44,15 @@ export class JobsApp extends HTMLElement {
       location.href = `${BASE}/`;
     };
     (this.querySelector('#jobs-new') as HTMLElement).onclick = () => this.openDialog(null);
+    // Card actions, delegated: refreshed cards need no rewiring.
+    this.addEventListener('click', e => {
+      const button = (e.target as HTMLElement).closest<HTMLElement>('[data-run], [data-edit], [data-del]');
+      if (!button) return;
+      const { run, edit, del, schedule, command } = button.dataset;
+      if (run) void this.run(run);
+      else if (edit) this.openDialog({ name: edit, schedule: schedule ?? '', command: command ?? '' });
+      else if (del) this.confirmDelete(del);
+    });
     // The footer button lives outside the form (dialog footer slot):
     // submit the form so <validation-enhancer-zod> validates it first.
     (this.querySelector('#job-save') as HTMLElement).onclick = () => this.jobForm().requestSubmit();
@@ -55,7 +67,9 @@ export class JobsApp extends HTMLElement {
     void customElements.whenDefined('validation-enhancer-zod').then(() =>
       (this.querySelector('validation-enhancer-zod') as ValidationEnhancerZod).setZodSchema(JobSaveSchema));
 
-    this.load();
+    // Server-rendered with the list already: refresh on the poll only.
+    // Rendered without it (astro dev's own render, a failed listing): now.
+    if ((this.querySelector('#jobs-list') as HTMLElement | null)?.dataset.loaded !== 'true') void this.load();
     this.pollTimer = setInterval(() => this.load(), 15000);
   }
 
@@ -70,77 +84,14 @@ export class JobsApp extends HTMLElement {
     });
   }
 
+  /** Swap in a fresh server-rendered list. A failed fetch keeps what is shown. */
   private async load(): Promise<void> {
     let r: Response;
-    try { r = await fetch(`${BASE}/api/jobs`); } catch { return; }
+    try { r = await fetch(`${BASE}/partials/jobs-list`); } catch { return; }
     if (r.status === 401) { location.href = `${BASE}/login`; return; }
     if (!r.ok) return;
-    this.render(await r.json() as JobsState);
-  }
-
-  private render(st: JobsState): void {
-    const fresh = this.querySelector('#jobs-new') as HTMLElement;
-    const list = this.querySelector('#jobs-list') as HTMLElement;
-    fresh.classList.remove('hidden');
-    list.innerHTML = st.jobs.length === 0
-      ? `<p class="jobs-empty">no jobs yet — "new job" schedules a recurring command.</p>`
-      : st.jobs.map(j => this.card(j)).join('');
-    this.querySelectorAll<HTMLElement>('[data-run]').forEach(el => {
-      el.onclick = () => this.run(el.dataset.run!);
-    });
-    this.querySelectorAll<HTMLElement>('[data-edit]').forEach(el => {
-      el.onclick = () => {
-        const job = st.jobs.find(j => j.name === el.dataset.edit);
-        if (job) this.openDialog(job);
-      };
-    });
-    this.querySelectorAll<HTMLElement>('[data-del]').forEach(el => {
-      el.onclick = () => this.confirmDelete(el.dataset.del!);
-    });
-  }
-
-  private card(j: ScheduledJob): string {
-    const badges = [
-      j.active
-        ? '<wa-badge pill variant="success">scheduled</wa-badge>'
-        : '<wa-badge pill>invalid schedule</wa-badge>',
-      j.running
-        ? `<wa-badge pill variant="brand">running</wa-badge>`
-        : '',
-      j.lastResult === 'failed'
-        ? '<wa-badge pill variant="danger">last run failed</wa-badge>'
-        : '',
-    ].filter(Boolean).join('');
-    const view = j.running
-      ? `<a class="job-view" href="${BASE}/?live=${encodeURIComponent(j.session)}">view run<wa-icon name="play"></wa-icon></a>`
-      : '';
-    const last = j.last
-      ? `${esc(j.last)}${j.lastResult === 'success' ? ' · ok' : j.lastResult === 'failed' ? ' · failed' : ''}`
-      : 'never';
-    return `
-      <wa-card class="job">
-        <div class="job-head">
-          <span class="job-name"><wa-icon name="clock"></wa-icon>${esc(j.name)}</span>
-          <span class="wa-cluster wa-gap-3xs">${badges}${view}</span>
-        </div>
-        <dl class="job-meta">
-          <dt>schedule</dt><dd><code>${esc(j.schedule) || '—'}</code></dd>
-          <dt>command</dt><dd><code>${esc(j.command) || '—'}</code></dd>
-          <dt>next</dt><dd>${esc(j.next ?? '—')}</dd>
-          <dt>last run</dt><dd>${esc(last)}</dd>
-        </dl>
-        <div class="job-actions wa-cluster wa-gap-2xs">
-          <wa-button size="s" data-run="${esc(j.name)}">
-            <wa-icon slot="start" name="play"></wa-icon>run now
-          </wa-button>
-          <wa-button size="s" appearance="plain" data-edit="${esc(j.name)}">
-            <wa-icon slot="start" name="pencil"></wa-icon>edit
-          </wa-button>
-          <wa-button size="s" appearance="plain" variant="danger" data-del="${esc(j.name)}">
-            <wa-icon slot="start" name="trash-can"></wa-icon>delete
-          </wa-button>
-        </div>
-      </wa-card>`;
+    const fresh = parseServerHTML(await r.text());
+    this.querySelector('#jobs-list')?.replaceWith(...fresh);
   }
 
   // ---- create / edit ----
@@ -187,7 +138,7 @@ export class JobsApp extends HTMLElement {
     }
   }
 
-  private openDialog(job: ScheduledJob | null): void {
+  private openDialog(job: JobFields | null): void {
     this.editing = job?.name ?? null;
     const dlg = this.querySelector('#job-dialog') as WaDialog;
     const name = this.querySelector('#job-name') as WaFormControl;

@@ -460,8 +460,11 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
     // Any other page GET under the base (/, /jobs, /settings, a typo'd
     // path, …) renders the login page in place — the address bar keeps
     // the URL, so signing in reloads straight into the page that was asked
-    // for. No per-page allowlist to forget when a page is added.
-    if (req.method === 'GET' && underBase(url) && !url.startsWith(route('/api/'))) {
+    // for. No per-page allowlist to forget when a page is added. Data
+    // routes are never pages: the API and the server-rendered partials
+    // (fragments an element swaps in) answer 401 instead.
+    if (req.method === 'GET' && underBase(url)
+      && !url.startsWith(route('/api/')) && !url.startsWith(route('/partials/'))) {
       req.url = route('/login');
       renderAstro(req, res);
       return;

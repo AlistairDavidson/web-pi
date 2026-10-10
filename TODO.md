@@ -7,7 +7,10 @@ minio npm, container - so web apps in future can handle file uploads
 winston, winston-loki, loki container - observability.
   add logs to code
 
-preact signals
+preact signals - make this available for any frontend state needs apps might have in future
+
+## Quality
+playwright fuzzer? fuzz based integration testing
 
 ## Management page
 rollback AND applying changes in one place:
@@ -43,12 +46,6 @@ console sidebar for when in other apps (in which case maybe console isn't an app
 
 app management mcp
 how to build an app skills
-
-## Quality
-grab soothing-booking's approach to APIs and error handling
-- brand ids and anything else that needs it
-
-playwright fuzzer? fuzz based integration testing
 
 ## Distribution
 installation instructions / script for agents / actual scripts

@@ -265,4 +265,4 @@ export class AgentTerminal extends HTMLElement {
   refit(): void { this.fitXtermAddon?.fit(); }
 }
 
-customElements.define('agent-terminal', AgentTerminal);
+if (!customElements.get('agent-terminal')) customElements.define('agent-terminal', AgentTerminal);

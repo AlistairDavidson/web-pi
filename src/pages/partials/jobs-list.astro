@@ -1,0 +1,20 @@
+---
+// GET /partials/jobs-list — the /jobs list as a fragment: <jobs-app>
+// swaps it in on its 15 s refresh and after save / run / delete. Behind
+// the main.ts gate (signed out: 401) and src/middleware.ts (no locals:
+// 503). A failed listing answers 500 with no fragment — the element keeps
+// what it shows.
+import JobsList from '../../components/JobsApp/JobsList.astro';
+import { assertWebPiLocals } from '../../lib/web/locals';
+
+export const partial = true;
+
+const { webpi } = assertWebPiLocals(Astro.locals);
+const listed = await webpi.scheduler.listJobs();
+Astro.response.headers.set('Cache-Control', 'no-store');
+if (!listed.ok) {
+  console.error(`jobs list partial: ${listed.errorMessage}`);
+  Astro.response.status = 500;
+}
+---
+{listed.ok && <JobsList jobs={listed.data.jobs} />}
