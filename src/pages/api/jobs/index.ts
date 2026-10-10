@@ -1,0 +1,23 @@
+// /api/jobs — GET lists the scheduled jobs; POST creates or updates one
+// (name normalized, then validated, in saveJob).
+import type { APIRoute } from 'astro';
+import { assertWebPiLocals } from '../../../lib/web/locals';
+import { parseAndValidateAPIRequest } from '../../../lib/web/parsing.service';
+import { failureResponse, jobFailureResponse, jsonResponse } from '../../../lib/web/responses.service';
+import { jobSaveBody } from '../../../schemas/api';
+
+export const GET: APIRoute = async ({ locals }) => {
+  const { webpi } = assertWebPiLocals(locals);
+  const listed = await webpi.scheduler.listJobs();
+  if (!listed.ok) return jobFailureResponse(listed);
+  return jsonResponse(listed.data, 200);
+};
+
+export const POST: APIRoute = async ({ locals, request }) => {
+  const { webpi } = assertWebPiLocals(locals);
+  const parsed = await parseAndValidateAPIRequest(request, jobSaveBody);
+  if (!parsed.ok) return failureResponse(parsed);
+  const saved = await webpi.scheduler.saveJob(parsed.data);
+  if (!saved.ok) return jobFailureResponse(saved);
+  return jsonResponse({ name: saved.data.name, session: null }, 200);
+};

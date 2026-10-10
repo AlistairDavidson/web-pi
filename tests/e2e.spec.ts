@@ -275,6 +275,15 @@ test('malformed requests and frames are rejected without taking the server down'
   // JSON bodies must be objects.
   expect(await status('POST', '/api/session/hide', '[]')).toBe(400);
   expect(await status('POST', '/api/new', '"just a string"')).toBe(400);
+  // Bodies are capped (the adapter's bodySizeLimit, 10 KiB): an oversized
+  // one aborts mid-read and fails to parse — never buffered whole.
+  expect(await status('POST', '/api/new', JSON.stringify({ name: 'x'.repeat(20_000) }))).toBe(400);
+  // The JSON API only parses JSON (or form) bodies.
+  expect(await page.evaluate(async () => (await fetch('/api/new', {
+    method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '{"name":"x"}',
+  })).status)).toBe(415);
+  // API answers are per-user state: never cached.
+  expect(await page.evaluate(async () => (await fetch('/api/state')).headers.get('cache-control'))).toBe('no-store');
 
   // Junk WS frames — before and after attaching (`null` and a data-less
   // input each used to crash the server) — are dropped; the socket lives on.

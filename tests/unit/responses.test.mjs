@@ -1,0 +1,83 @@
+// responses.test.mjs — src/lib/web/responses.service.ts: every error code
+// of every family maps to its status and the body the browser reads. The
+// wire statuses are the ones server/main.ts answered before the API moved
+// into Astro routes (the e2e suite asserts them too).
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  databaseUpdateFailureResponse, failureResponse, firstIssueText, invalidJobNameResponse,
+  jobFailureResponse, piUpdateResponse, piUpdateStatus, tmuxSessionFailureResponse,
+} from '../../dist-server/src/lib/web/responses.service.js';
+
+const failure = (resultType, errorCode, extra = {}) => ({ ok: false, resultType, errorCode, ...extra });
+
+test('failureResponse: parse, validation and upload codes', () => {
+  const cases = [
+    [failure('parse_request', 'invalid_form_data'), 400],
+    [failure('parse_request', 'invalid_json'), 400],
+    [failure('parse_request', 'unsupported_content_type'), 415],
+    [failure('file_upload', 'no_file_provided'), 400],
+    [failure('file_upload', 'file_too_large', { errorMessage: 'too big' }), 400],
+    [failure('file_upload', 'unsupported_file_type', { errorMessage: 'nope' }), 400],
+    [failure('validation', 'validation_failure', { issues: { name: 'required' } }), 400],
+  ];
+  for (const [f, status] of cases) assert.equal(failureResponse(f).status, status, f.errorCode);
+});
+
+test('jobFailureResponse: every jobs code → status, with the { error, detail } body /jobs reads', async () => {
+  const session = 'webpi-nightly';
+  const cases = [
+    ['invalid_job_name', 400], ['command_required', 400], ['invalid_command', 400], ['invalid_schedule', 400],
+    ['job_not_found', 404], ['run_active', 409], ['tmux_error', 500], ['database_error', 500],
+  ];
+  for (const [code, status] of cases) {
+    const res = jobFailureResponse(failure('run_job', code, { errorMessage: `msg ${code}`, data: { name: 'nightly', session } }));
+    assert.equal(res.status, status, code);
+    const body = await res.json();
+    assert.equal(body.code, code);
+    assert.ok('detail' in body, code);
+  }
+  // run_active points at the live session; tmux_error carries tmux's reason as the detail
+  assert.equal((await jobFailureResponse(failure('run_job', 'run_active', { data: { name: 'n', session } })).json()).detail, session);
+  assert.deepEqual(await jobFailureResponse(failure('run_job', 'tmux_error', { errorMessage: 'boom' })).json(),
+    { error: 'could not open run session', detail: 'boom', code: 'tmux_error' });
+  const invalid = invalidJobNameResponse();
+  assert.equal(invalid.status, 400);
+  assert.deepEqual(await invalid.json(), { error: 'invalid job name', detail: null, code: 'invalid_job_name' });
+});
+
+test('tmuxSessionFailureResponse: the never-fork guard is 503 with its message; tmux failure is 409', async () => {
+  const guard = tmuxSessionFailureResponse(failure('tmux_session', 'server_not_running',
+    { errorMessage: 'workspace tmux server not running on /x' }));
+  assert.equal(guard.status, 503);
+  assert.match((await guard.json()).error, /workspace tmux server not running/);
+  const taken = tmuxSessionFailureResponse(failure('tmux_session', 'tmux_error', { errorMessage: 'duplicate session' }));
+  assert.equal(taken.status, 409);
+  assert.equal((await taken.json()).error, 'could not create session (name taken?)');
+});
+
+test('piUpdateStatus / piUpdateResponse: busy is 409, the rest 500, success 200 with the UpdateResult body', async () => {
+  for (const [code, status] of [['busy', 409], ['npm_missing', 500], ['npm_check_failed', 500], ['npm_failed', 500]]) {
+    assert.equal(piUpdateStatus(failure('pi_update', code)), status, code);
+  }
+  const data = { dryRun: false, command: 'npm install x', before: '1.0.0', after: '1.1.0', output: 'ok' };
+  const ok = piUpdateResponse({ ok: true, resultType: 'pi_update', data });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(await ok.json(), { ok: true, ...data });
+  const busy = piUpdateResponse(failure('pi_update', 'busy', { data, errorMessage: 'an update is already running' }));
+  assert.equal(busy.status, 409);
+  assert.equal((await busy.json()).error, 'an update is already running');
+});
+
+test('databaseUpdateFailureResponse: 500 with the caller’s message', async () => {
+  const res = databaseUpdateFailureResponse(failure('database_update', 'database_error', { errorMessage: 'disk' }),
+    'could not save hidden state');
+  assert.equal(res.status, 500);
+  assert.deepEqual(await res.json(), { error: 'could not save hidden state', code: 'database_error' });
+});
+
+test('firstIssueText: "field: message", the bare message at the root, a fallback when empty', () => {
+  assert.equal(firstIssueText({ name: 'required', other: 'x' }), 'name: required');
+  assert.equal(firstIssueText({ '': 'invalid session id' }), 'invalid session id');
+  assert.equal(firstIssueText({}), 'bad request');
+});

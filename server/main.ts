@@ -13,23 +13,18 @@ import { WebSocketServer, type WebSocket } from 'ws';
 // @ts-ignore — no bundled types for the native module
 import * as pty from 'node-pty';
 import { Auth, RateLimiter, type Auth as AuthType } from '../src/lib/auth';
-import { listSessions, findSession } from '../src/lib/sessions';
+import { findSession } from '../src/lib/sessions';
 import { HiddenSessions } from '../src/lib/hidden-sessions';
 import { StateDb } from '../src/lib/db';
 import * as tmux from '../src/lib/tmux';
 import { ENV, RAW_ENV, APP_ROOT, PI_BIN, PI_AGENT_DIR, PI_SESSION_DIR } from '../src/lib/env';
 import * as jobs from '../src/lib/jobs';
-import * as api from '../src/lib/api';
-import {
-  autoUpdateEnabled, lastCheck, lastUpdate, AutoUpdater,
-} from '../src/lib/auto-update';
-import {
-  PI_PACKAGE, appVersion, npmPath, piDeclared, piInstalled, runPiUpdate, updateResultBody,
-  type PiUpdateFailure,
-} from '../src/lib/settings';
-import { parseClientMsg } from '../src/lib/types';
-import type { ClientMsg, ServerMsg, ConsoleState, SettingsState } from '../src/lib/types';
-import { JobNameSchema, PiSessionIdSchema, TmuxSessionNameSchema } from '../src/schemas/ids';
+import { AutoUpdater } from '../src/lib/auto-update';
+import { createServices, type ServerConfig, type WebPiLocals } from '../src/lib/services';
+import type { ClientMsg, ServerMsg } from '../src/lib/types';
+import { loginBody } from '../src/schemas/api';
+import { parseClientMsg } from '../src/schemas/frames';
+import { PiSessionIdSchema, TmuxSessionNameSchema } from '../src/schemas/ids';
 import type { SessionToken, TmuxSessionName } from '../src/types/branded';
 
 // URL base path ('/' or '/foo', no trailing slash). Must match the base
@@ -57,7 +52,7 @@ if (PI_AGENT_DIR && !RAW_ENV.WEB_PI_AGENT_DIR) {
 }
 const agentTemplate = path.join(APP_ROOT, 'pi');
 
-const CFG = {
+const CFG: ServerConfig = {
   host: ENV.WEB_PI_HOST,
   port: ENV.WEB_PI_PORT,
   base: normalizeBase(ENV.WEB_PI_BASE),
@@ -143,6 +138,11 @@ scheduler.start();
 // OFF nothing npm-shaped is ever scheduled).
 const autoUpdater = new AutoUpdater({ db: stateDb, appRoot: APP_ROOT });
 autoUpdater.start();
+// Everything stateful the Astro side (API routes, pages) may use, built
+// once here and passed to the Astro handler in locals — never imported
+// there (a Vite-bundled second copy would carry its own state; see
+// src/lib/services.ts).
+const services = createServices({ cfg: CFG, stateDb, auth, hiddenSessions, scheduler, autoUpdater, sessionEnv });
 // The scheduler's single shutdown hook. The SIGTERM/SIGINT handler is a
 // sibling task (task/session-lifecycle, merged separately); at merge time
 // it calls shutdownScheduler() — wired here so teardown has exactly one
@@ -172,10 +172,6 @@ function send(res: http.ServerResponse, code: number, body: string,
   headers?: Record<string, string>): void {
   res.writeHead(code, { 'Cache-Control': 'no-store', ...headers });
   res.end(body);
-}
-function sendJSON(res: http.ServerResponse, code: number, obj: unknown,
-  headers?: Record<string, string>): void {
-  send(res, code, JSON.stringify(obj), { 'Content-Type': 'application/json', ...headers });
 }
 function sendClientFile(res: http.ServerResponse, rel: string, cache: boolean): void {
   // rel is from a fixed route table or validated against traversal below.
@@ -220,54 +216,6 @@ function ipOf(req: http.IncomingMessage): string {
   if (hops.length === 0) return peer; // reached us without passing the proxy
   return hops[Math.max(0, hops.length - CFG.trustProxy)]!;
 }
-/** decodeURIComponent that answers null instead of throwing on malformed
- *  escapes (`%E0`) — a throw in the request handler takes the process down. */
-function decodeSegment(s: string): string | null {
-  try { return decodeURIComponent(s); } catch { return null; }
-}
-/** Run an async route body. A rejection costs one 500 — the async twin of
- *  the createServer guard below — never an unhandled rejection (which
- *  would take the process, and every tmux session with it, down). */
-function respond(res: http.ServerResponse, work: () => Promise<void>): void {
-  work().catch(err => {
-    console.error('request handler error', err);
-    if (!res.headersSent) send(res, 500, 'internal error'); else res.destroy();
-  });
-}
-
-/** Jobs failures → status + the { error, detail } body /jobs reads. */
-type JobFailure = jobs.SaveJobFailure | jobs.DeleteJobFailure | jobs.RunJobFailure | jobs.ListJobsFailure;
-function sendJobFailure(res: http.ServerResponse, f: JobFailure): void {
-  const body = (error: string, detail: string | null = null) => ({ error, detail });
-  switch (f.errorCode) {
-    case 'invalid_job_name':
-    case 'command_required':
-    case 'invalid_command':
-    case 'invalid_schedule':
-      sendJSON(res, 400, body(f.errorMessage ?? f.errorCode)); return;
-    case 'job_not_found':
-      sendJSON(res, 404, body(f.errorMessage ?? 'no such job')); return;
-    case 'run_active':
-      sendJSON(res, 409, body(f.errorMessage ?? 'previous run is still active', f.data?.session ?? null)); return;
-    case 'tmux_error':
-      sendJSON(res, 500, body('could not open run session', f.errorMessage ?? null)); return;
-    case 'database_error':
-      sendJSON(res, 500, body(f.errorMessage ?? 'database error')); return;
-    default:
-      f satisfies never;
-  }
-}
-
-function piUpdateStatus(f: PiUpdateFailure): number {
-  switch (f.errorCode) {
-    case 'busy': return 409;
-    case 'npm_missing':
-    case 'npm_check_failed':
-    case 'npm_failed': return 500;
-    default: return f satisfies never;
-  }
-}
-
 // ---------- origin check (DESIGN_REVIEW §1.2) ----------
 // SameSite=Strict doesn't stop sibling subdomains (same site, not same
 // origin) opening the terminal WS with the cookie attached, and no Origin
@@ -325,9 +273,6 @@ function originOk(req: http.IncomingMessage): boolean {
 function underBase(url: string): boolean {
   return CFG.base === '/' || url === CFG.base || url.startsWith(CFG.base + '/');
 }
-function authed(req: http.IncomingMessage): boolean {
-  return auth.valid(Auth.sessionToken(req.headers.cookie));
-}
 /** Header that clears the browser's session cookie (logout, log out everywhere). */
 const clearSessionCookie = (): string =>
   `webpi_session=; HttpOnly; Secure; SameSite=Strict; Path=${CFG.base}; Max-Age=0`;
@@ -336,8 +281,8 @@ const clearSessionCookie = (): string =>
 // The Astro build emits an ESM handler (dist/server/entry.mjs); loaded once
 // via dynamic import (the compiled server here is CJS). Page routes render
 // through it; the `next` fallback covers unknown paths (404).
-type AstroHandler =
-  (req: http.IncomingMessage, res: http.ServerResponse, next: (err?: unknown) => void) => void;
+type AstroHandler = (req: http.IncomingMessage, res: http.ServerResponse,
+  next: (err?: unknown) => void, locals?: WebPiLocals) => void;
 
 const astroReady: Promise<AstroHandler> =
   import(pathToFileURL(CFG.astroEntry).href)
@@ -346,9 +291,12 @@ astroReady.catch(err => console.error(
   `astro SSR entry failed to load (${CFG.astroEntry}) — did 'npm run build' run?):`,
   (err as Error)?.message ?? err));
 
-function renderAstro(req: http.IncomingMessage, res: http.ServerResponse): void {
+/** Render through Astro. `locals` (the services + the request's session
+ *  token) only on the authenticated path — src/middleware.ts fails closed
+ *  for the API and partials without them. */
+function renderAstro(req: http.IncomingMessage, res: http.ServerResponse, locals?: WebPiLocals): void {
   astroReady
-    .then(handler => handler(req, res, () => send(res, 404, 'not found')))
+    .then(handler => handler(req, res, () => send(res, 404, 'not found'), locals))
     .catch(err => { console.error('astro handler error', err); send(res, 500, 'render failed'); });
 }
 
@@ -375,7 +323,7 @@ function securityHeaderBlock(): string {
 }
 
 /** Arm `res` so the security headers ride on every response the process
- *  sends, whichever path writes it: send()/sendJSON()/sendClientFile(),
+ *  sends, whichever path writes it: send()/sendClientFile(),
  *  the 302, and the Astro SSR handler (which calls writeHead/setHeader on
  *  the same object). Injection happens at writeHead *and* end — whichever
  *  fires first — and is idempotent, so a handler that already set one of
@@ -421,7 +369,7 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
     if (!loginLimiter.allow(ipOf(req))) { send(res, 429, 'too many attempts'); return; }
     readBody(req, (err, body) => {
       if (err) { send(res, 400, 'bad request'); return; }
-      const parsed = api.loginBody.safeParse(body);
+      const parsed = loginBody.safeParse(body);
       if (!parsed.success) {
         send(res, 401, 'invalid credentials'); // nginx logs it; fail2ban watches
         return;
@@ -474,7 +422,8 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
   }
 
   // Everything below requires a valid session...
-  if (!authed(req)) {
+  const token = Auth.sessionToken(req.headers.cookie);
+  if (!token || !auth.valid(token)) {
     // ...except the PWA offline shell (static, session-free — the service
     // worker precaches it at install time, pre-auth), the hashed assets,
     // and the login page itself. Every data/terminal route stays 401.
@@ -514,231 +463,25 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
     return;
   }
 
-  if (req.method === 'GET' && url === route('/api/state')) {
-    // Two things share this one response: the poll every open tab makes
-    // every 15 s re-arms the browser cookie's Max-Age when it has drifted
-    // near half the sliding window (auth.cookieRefresh decides — see the
-    // justification there), and the scan itself is async + title-cached
-    // so the poll never holds the event loop — terminal WS traffic keeps
-    // flowing while it runs.
-    const refresh = auth.cookieRefresh(Auth.sessionToken(req.headers.cookie), CFG.base);
-    respond(res, async () => {
-      const sessList = await listSessions(CFG.sessionsDir); // tolerates junk, never rejects
-      const live = await tmux.listSessions();
-      const state: ConsoleState = {
-        me: 'ok', configured: auth.configured(),
-        live,
-        sessions: sessList.map(s => ({ ...s, hidden: hiddenSessions.has(s.id) })),
-        hiddenCount: hiddenSessions.size,
-      };
-      sendJSON(res, 200, state, refresh === null ? undefined : { 'Set-Cookie': refresh });
-    });
-    return;
-  }
-
-  if (req.method === 'POST' && url === route('/api/new')) {
-    readBody(req, (err, body) => {
-      if (err) { send(res, 400, 'bad request'); return; }
-      const parsed = api.newSessionBody.safeParse(body);
-      if (!parsed.success) { send(res, 400, api.firstIssue(parsed.error)); return; }
-      const slug = parsed.data.name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-')
-        .replace(/^-+|-+$/g, '').slice(0, 30);
-      if (!slug) { send(res, 400, 'name required'); return; }
-      const name = TmuxSessionNameSchema.safeParse(slug); // always passes: the slug is in-charset
-      if (!name.success) { send(res, 400, api.firstIssue(name.error)); return; }
-      respond(res, async () => {
-        const created = await tmux.newSession(name.data, CFG.newSessionCwd, CFG.command, sessionEnv);
-        if (created.ok) { sendJSON(res, 200, { name: created.data.name }); return; }
-        switch (created.errorCode) {
-          // The never-fork guard's refusal is a distinct, user-facing
-          // error (503 — retryable once the workspace side is back),
-          // unlike a taken name (409).
-          case 'server_not_running': sendJSON(res, 503, { error: created.errorMessage }); return;
-          case 'tmux_error': sendJSON(res, 409, { error: 'could not create session (name taken?)' }); return;
-          default: created satisfies never;
-        }
-      });
-    });
-    return;
-  }
-
-  // Jobs are served by the in-process scheduler (src/lib/jobs.ts) —
-  // available everywhere the server runs, container included; there is
-  // no degraded mode anymore.
-  if (url === route('/api/jobs') || url.startsWith(route('/api/jobs/'))) {
-    const sub = url.slice(route('/api/jobs').length);
-    // A job name from the path: undecodable → 400 'bad job name' (a bad
-    // escape used to throw out of the handler); off-charset → the same
-    // 400 'invalid job name' the domain answers for a bad save.
-    const jobName = (segment: string) => {
-      const decoded = decodeSegment(segment);
-      if (decoded === null) { send(res, 400, 'bad job name'); return null; }
-      const name = JobNameSchema.safeParse(decoded);
-      if (!name.success) { sendJSON(res, 400, { error: 'invalid job name', detail: null }); return null; }
-      return name.data;
-    };
-
-    if (req.method === 'GET' && sub === '') {
-      respond(res, async () => {
-        const listed = await scheduler.listJobs();
-        if (!listed.ok) { sendJobFailure(res, listed); return; }
-        sendJSON(res, 200, listed.data);
-      });
-      return;
-    }
-    if (req.method === 'POST' && (sub === '' || sub === '/validate')) {
-      readBody(req, (err, body) => {
-        if (err) { send(res, 400, 'bad request'); return; }
-        if (sub === '/validate') {
-          const parsed = api.jobValidateBody.safeParse(body);
-          if (!parsed.success) { send(res, 400, api.firstIssue(parsed.error)); return; }
-          sendJSON(res, 200, jobs.checkCron(parsed.data.schedule));
-        } else {
-          const parsed = api.jobSaveBody.safeParse(body);
-          if (!parsed.success) { send(res, 400, api.firstIssue(parsed.error)); return; }
-          respond(res, async () => {
-            const saved = await scheduler.saveJob(parsed.data);
-            if (!saved.ok) { sendJobFailure(res, saved); return; }
-            sendJSON(res, 200, { name: saved.data.name, session: null });
-          });
-        }
-      });
-      return;
-    }
-    const runNow = sub.match(/^\/([^/]+)\/run$/);
-    if (req.method === 'POST' && runNow) {
-      const name = jobName(runNow[1]!);
-      if (name === null) return;
-      respond(res, async () => {
-        const run = await scheduler.runJob(name);
-        if (!run.ok) { sendJobFailure(res, run); return; }
-        sendJSON(res, 200, { name: run.data.name, session: run.data.session });
-      });
-      return;
-    }
-    const remove = sub.match(/^\/([^/]+)$/);
-    if (req.method === 'DELETE' && remove) {
-      const name = jobName(remove[1]!);
-      if (name === null) return;
-      respond(res, async () => {
-        const deleted = await scheduler.deleteJob(name);
-        if (!deleted.ok) { sendJobFailure(res, deleted); return; }
-        sendJSON(res, 200, { name: deleted.data.name, session: null });
-      });
-      return;
-    }
-    send(res, 404, 'not found');
-    return;
-  }
-
-  // Hide / unhide past sessions (sidebar 'delete' — reversible by design:
-  // ids land as hidden rows in the state db's sessions table, never pi's store).
-  if (req.method === 'POST' && url === route('/api/session/hide')) {
-    readBody(req, (err, body) => {
-      if (err) { send(res, 400, 'bad request'); return; }
-      const parsed = api.hideBody.safeParse(body);
-      if (!parsed.success) { send(res, 400, api.firstIssue(parsed.error)); return; }
-      const saved = hiddenSessions.hide(parsed.data.id);
-      if (!saved.ok) { sendJSON(res, 500, { error: 'could not save hidden state' }); return; }
-      sendJSON(res, 200, { ok: true });
-    });
-    return;
-  }
-
-  if (req.method === 'POST' && url === route('/api/session/unhide')) {
-    readBody(req, (err, body) => {
-      if (err) { send(res, 400, 'bad request'); return; }
-      const parsed = api.unhideBody.safeParse(body);
-      // Fixed message: a failed parse is always an all/id shape problem,
-      // and zod's own union error would only say 'Invalid input'.
-      if (!parsed.success) { send(res, 400, 'invalid session id'); return; }
-      const saved = 'all' in parsed.data ? hiddenSessions.unhideAll() : hiddenSessions.unhide(parsed.data.id);
-      if (!saved.ok) { sendJSON(res, 500, { error: 'could not save hidden state' }); return; }
-      sendJSON(res, 200, { ok: true });
-    });
-    return;
-  }
-
-  // Paths and versions only — no credential or hash contents ever leave.
-  if (req.method === 'GET' && url === route('/api/settings')) {
-    const state: SettingsState = {
-      me: 'ok',
-      appVersion: appVersion(APP_ROOT),
-      nodeVersion: process.version,
-      host: CFG.host,
-      port: CFG.port,
-      base: CFG.base,
-      command: CFG.command.join(' '),
-      newSessionCwd: CFG.newSessionCwd,
-      agentDir: CFG.agentDir,
-      sessionsDir: CFG.sessionsDir,
-      stateDb: CFG.dbFile,
-      tmuxSocket: tmux.SOCKET,
-      tmuxConf: fs.existsSync(tmux.CONF) ? tmux.CONF : null,
-      appRoot: APP_ROOT,
-      piPackage: PI_PACKAGE,
-      piDeclared: piDeclared(APP_ROOT),
-      piInstalled: piInstalled(APP_ROOT),
-      npmAvailable: npmPath() !== null,
-      piAutoUpdate: {
-        enabled: autoUpdateEnabled(stateDb),
-        lastCheck: lastCheck(stateDb),
-        lastUpdate: lastUpdate(stateDb),
-      },
-    };
-    sendJSON(res, 200, state);
-    return;
-  }
-
-  // Manual `npm install pi@latest` in the app dir. Long-running by design
-  // (npm timeout 10 min server-side); concurrent runs are refused (409).
-  // {dryRun:true} is a check-only mode: proves npm runs, installs nothing.
-  if (req.method === 'POST' && url === route('/api/update-pi')) {
-    readBody(req, (err, body) => {
-      if (err) { send(res, 400, 'bad request'); return; }
-      const parsed = api.updatePiBody.safeParse(body);
-      if (!parsed.success) { send(res, 400, api.firstIssue(parsed.error)); return; }
-      respond(res, async () => {
-        const r = await runPiUpdate(APP_ROOT, parsed.data.dryRun);
-        sendJSON(res, r.ok ? 200 : piUpdateStatus(r), updateResultBody(r));
-      });
-    });
-    return;
-  }
-
-  // The auto-update toggle (/settings): persist the setting and rewire the
-  // periodic check (src/lib/auto-update.ts). Body parsing is deliberately
-  // trivial — one boolean field, nothing else read — so it stays obvious
-  // what a validation layer must accept.
-  // FLEET JUNCTION (task/zod-validation): adopt this body into the shared
-  // validation pattern when it lands; the handler's read is the two lines
-  // below the readBody callback.
-  if (req.method === 'POST' && url === route('/api/auto-update-pi')) {
-    readBody(req, (err, body) => {
-      if (err) { send(res, 400, 'bad request'); return; }
-      if (typeof body?.enabled !== 'boolean') { send(res, 400, 'enabled must be a boolean'); return; }
-      const saved = autoUpdater.setEnabled(body.enabled);
-      if (!saved.ok) { sendJSON(res, 500, { error: saved.errorMessage }); return; }
-      sendJSON(res, 200, { ok: true, enabled: body.enabled });
-    });
-    return;
-  }
-
   // Authenticated: hashed assets served statically; /login is pointless
-  // when signed in (redirect); every other GET goes to the Astro SSR
-  // handler (page routes; unknown paths 404 via next). API routes above
-  // have already returned.
+  // when signed in (redirect).
   if (req.method === 'GET') {
     if (url.startsWith(route('/_astro/'))) { sendClientFile(res, url.slice(CFG.base.length), true); return; }
     if (url === route('/login')) {
       res.writeHead(302, { Location: CFG.base === '/' ? '/' : CFG.base }).end();
       return;
     }
-    renderAstro(req, res);
-    return;
   }
 
-  send(res, 404, 'not found');
+  // Everything else under the base — pages, the JSON API (src/pages/api)
+  // and partials — renders through Astro, with the services and this
+  // request's token in locals. The origin and session checks above have
+  // already run; this is the only place locals are passed.
+  if (!underBase(url)) { send(res, 404, 'not found'); return; }
+  // Astro throws on an undecodable path (a bad %-escape such as
+  // /api/jobs/%E0) — a client error, answered here.
+  try { decodeURI(url); } catch { send(res, 400, 'bad request'); return; }
+  renderAstro(req, res, { webpi: services, session: token });
 }
 
 // ---------- WebSocket → node-pty → tmux attach ----------

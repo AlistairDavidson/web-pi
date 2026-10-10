@@ -117,11 +117,19 @@ is a type error.
 - JSON endpoints are Astro routes under `src/pages/api/`. A handler
   parses, calls one domain function, and maps the result. No `try/catch`
   in handlers.
-- **Services come from `Astro.locals.webpi`.** Never construct or import a
-  stateful singleton (`StateDb`, `Auth`, `Scheduler`) inside the Astro
-  bundle. Vite would bundle a second copy with its own state (a second
-  scheduler, an `Auth` that knows no sessions). `server/main.ts` builds the
+- **Services come from `Astro.locals.webpi`** (`src/lib/services.ts`,
+  narrowed with `assertWebPiLocals`). Never construct or import a stateful
+  singleton (`StateDb`, `Auth`, `Scheduler`) inside the Astro bundle. Vite
+  would bundle a second copy with its own state: a second scheduler, an
+  `Auth` that knows no sessions, a second `runPiUpdate` busy flag letting a
+  manual and an automatic update race npm. `server/main.ts` builds the
   services once and passes them to the Astro handler.
+- **What Astro code may runtime-import:** `astro`, `src/lib/web/*`,
+  `src/schemas/*`, and `import type` from anything. Anything else from
+  `src/lib` is reached through `locals.webpi`. (Check:
+  `grep -r auth_sessions dist/server` should find nothing.)
+- **Content types:** API bodies are parsed only as `application/json` or
+  form-urlencoded; anything else is 415.
 - **Security invariants.** Changing any of these is a security change:
   - `server/main.ts` runs the origin check and the session check *before*
     anything reaches Astro, and only passes `locals` on the authenticated

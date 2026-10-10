@@ -9,7 +9,6 @@
 import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { UpdateResult } from './types';
 import type { ResultFailure, ResultSuccess } from '../types/result';
 
 export const PI_PACKAGE = '@earendil-works/pi-coding-agent';
@@ -78,12 +77,6 @@ export type PiUpdateErrorCode = 'busy' | 'npm_missing' | 'npm_check_failed' | 'n
 export type PiUpdateSuccess = ResultSuccess<'pi_update', PiUpdateData>;
 export type PiUpdateFailure = ResultFailure<'pi_update', PiUpdateData, PiUpdateErrorCode>;
 export type PiUpdateResult = PiUpdateSuccess | PiUpdateFailure;
-
-/** The wire shape POST /api/update-pi answers with (and /settings reads). */
-export function updateResultBody(r: PiUpdateResult): UpdateResult {
-  const data = r.data ?? { dryRun: false, command: '', before: null, after: null, output: '' };
-  return r.ok ? { ok: true, ...data } : { ok: false, ...data, error: r.errorMessage ?? 'update failed' };
-}
 
 /** Run (or dry-run) a pi update. Never rejects: every outcome is a
  *  result. The install spec defaults to @latest (the manual button); the
