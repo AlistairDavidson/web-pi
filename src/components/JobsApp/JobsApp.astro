@@ -8,8 +8,7 @@ import "@awesome.me/webawesome/dist/components/input/input.js";
 import "@awesome.me/webawesome/dist/components/textarea/textarea.js";
 import "@awesome.me/webawesome/dist/components/toast/toast.js";
 import JobsList from "./JobsList.astro";
-import WaInputField from "../form/WaInputField.astro";
-import WaTextareaField from "../form/WaTextareaField.astro";
+import WaField from "../form/WaField.astro";
 import { zodSchemaToHTMLAttributes } from "../../lib/web/zod.service";
 import { JobSaveSchema } from "../../schemas/jobs";
 import type { ScheduledJob } from "../../lib/types";
@@ -53,7 +52,7 @@ const validation = zodSchemaToHTMLAttributes(JobSaveSchema);
   <wa-dialog id="job-dialog" label="new job" with-footer>
     <validation-enhancer-zod>
       <form id="job-form" class="wa-stack wa-gap-s" novalidate>
-        <WaInputField
+        <WaField
           id="job-name"
           name="name"
           label="name"
@@ -62,7 +61,7 @@ const validation = zodSchemaToHTMLAttributes(JobSaveSchema);
           {...validation.name}
         />
         <div>
-          <WaInputField
+          <WaField
             id="job-schedule"
             name="schedule"
             label="schedule (cron)"
@@ -76,7 +75,8 @@ const validation = zodSchemaToHTMLAttributes(JobSaveSchema);
             aria-live="polite"
           ></div>
         </div>
-        <WaTextareaField
+        <WaField
+          as="textarea"
           id="job-command"
           name="command"
           label="command (shell; runs in tmux session webpi-<name>)"

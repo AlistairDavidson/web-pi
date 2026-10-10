@@ -6,6 +6,7 @@
 import type { CalendarCheck } from '../../lib/types';
 import { BASE } from '../../base';
 import { parseServerHTML } from '../html';
+import { signedInFetch, type SignedInFetchFailure } from '../signed-in-fetch';
 import '@awesome.me/webawesome/dist/components/button/button.js';
 import '@awesome.me/webawesome/dist/components/icon/icon.js';
 import '@awesome.me/webawesome/dist/components/card/card.js';
@@ -84,11 +85,28 @@ export class JobsApp extends HTMLElement {
     });
   }
 
+  /** A failed action's toast: the server's error (and detail) when it
+   *  answered with one, else `fallback`. */
+  private errorToast(fallback: string, body: { error?: string; detail?: string | null } = {}): void {
+    this.toast(`${body.error ?? fallback}${body.detail ? ` — ${body.detail}` : ''}`,
+      'danger', 'triangle-exclamation');
+  }
+
+  /** An action whose request got no answer. Signed out needs no toast:
+   *  the page is already on its way to /login. */
+  private notAnswered(failure: SignedInFetchFailure, fallback: string): void {
+    switch (failure.errorCode) {
+      case 'signed_out': return;
+      case 'network_error': this.errorToast(fallback, { detail: failure.errorMessage ?? 'network error' }); return;
+      default: return failure satisfies never;
+    }
+  }
+
   /** Swap in a fresh server-rendered list. A failed fetch keeps what is shown. */
   private async load(): Promise<void> {
-    let r: Response;
-    try { r = await fetch(`${BASE}/partials/jobs-list`); } catch { return; }
-    if (r.status === 401) { location.href = `${BASE}/login`; return; }
+    const sent = await signedInFetch(`${BASE}/partials/jobs-list`);
+    if (!sent.ok) return;
+    const r = sent.data.response;
     if (!r.ok) return;
     const fresh = parseServerHTML(await r.text());
     this.querySelector('#jobs-list')?.replaceWith(...fresh);
@@ -104,7 +122,7 @@ export class JobsApp extends HTMLElement {
     return this.jobForm().querySelector(`[name="${name}"]`) as WaFormControl | null;
   }
 
-  /** The field's message element (its hint slot — WaInputField). */
+  /** The field's message element (its hint slot — WaField). */
   private fieldError(control: WaFormControl): HTMLElement | null {
     const id = control.getAttribute('aria-errormessage');
     return id ? this.querySelector(`#${CSS.escape(id)}`) : null;
@@ -178,13 +196,14 @@ export class JobsApp extends HTMLElement {
   private async validate(): Promise<void> {
     const schedule = ((this.querySelector('#job-schedule') as WaFormControl).value ?? '').trim();
     if (!schedule) { this.setFeedback(null); return; }
-    try {
-      const r = await fetch(`${BASE}/api/jobs/validate`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ schedule }),
-      });
-      if (r.ok) this.setFeedback(await r.json() as CalendarCheck);
-    } catch { /* transient — the save path re-validates server-side */ }
+    const sent = await signedInFetch(`${BASE}/api/jobs/validate`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ schedule }),
+    });
+    // No answer is transient — the save path re-validates server-side.
+    if (!sent.ok || !sent.data.response.ok) return;
+    const check = await sent.data.response.json().catch(() => null) as CalendarCheck | null;
+    if (check) this.setFeedback(check);
   }
 
   /** Runs only for a submit the enhancer let through (the schema passed
@@ -197,17 +216,18 @@ export class JobsApp extends HTMLElement {
     const command = value('command');
     this.inflight = true;
     try {
-      const r = await fetch(`${BASE}/api/jobs`, {
+      const sent = await signedInFetch(`${BASE}/api/jobs`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, schedule, command }),
       });
+      if (!sent.ok) { this.notAnswered(sent, 'could not save job'); return; }
+      const r = sent.data.response;
       const body = await r.json().catch(() => ({})) as {
         name?: string; session?: string; error?: string; detail?: string | null; issues?: Record<string, string>;
       };
       if (!r.ok) {
         if (body.issues) this.showFieldErrors(body.issues);
-        this.toast(`${body.error ?? 'could not save job'}${body.detail ? ` — ${body.detail}` : ''}`,
-          'danger', 'triangle-exclamation');
+        this.errorToast('could not save job', body);
         return;
       }
       (this.querySelector('#job-dialog') as WaDialog).open = false;
@@ -221,15 +241,16 @@ export class JobsApp extends HTMLElement {
   // ---- run / delete ----
 
   private async run(name: string): Promise<void> {
-    const r = await fetch(`${BASE}/api/jobs/${encodeURIComponent(name)}/run`, { method: 'POST' });
+    const sent = await signedInFetch(`${BASE}/api/jobs/${encodeURIComponent(name)}/run`, { method: 'POST' });
+    if (!sent.ok) { this.notAnswered(sent, 'could not run job'); return; }
+    const r = sent.data.response;
     const body = await r.json().catch(() => ({})) as { session?: string; error?: string; detail?: string | null };
     if (r.ok) {
       this.toast(`run started — see Live (session ${body.session ?? `webpi-${name}`})`, 'success', 'circle-check');
     } else if (r.status === 409) {
       this.toast(body.error ?? 'previous run still active', 'warning', 'triangle-exclamation');
     } else {
-      this.toast(`${body.error ?? 'could not run job'}${body.detail ? ` — ${body.detail}` : ''}`,
-        'danger', 'triangle-exclamation');
+      this.errorToast('could not run job', body);
     }
     await this.load();
   }
@@ -245,16 +266,17 @@ export class JobsApp extends HTMLElement {
   private async deleteJob(): Promise<void> {
     if (!this.deleting) return;
     const name = this.deleting;
-    const r = await fetch(`${BASE}/api/jobs/${encodeURIComponent(name)}`, { method: 'DELETE' });
-    const body = await r.json().catch(() => ({})) as { error?: string; detail?: string | null };
+    const sent = await signedInFetch(`${BASE}/api/jobs/${encodeURIComponent(name)}`, { method: 'DELETE' });
     (this.querySelector('#job-delete-dialog') as WaDialog).open = false;
+    this.deleting = null;
+    if (!sent.ok) { this.notAnswered(sent, 'could not delete job'); return; }
+    const r = sent.data.response;
+    const body = await r.json().catch(() => ({})) as { error?: string; detail?: string | null };
     if (r.ok) {
       this.toast(`job ${name} deleted`, 'success', 'circle-check');
     } else {
-      this.toast(`${body.error ?? 'could not delete job'}${body.detail ? ` — ${body.detail}` : ''}`,
-        'danger', 'triangle-exclamation');
+      this.errorToast('could not delete job', body);
     }
-    this.deleting = null;
     await this.load();
   }
 }

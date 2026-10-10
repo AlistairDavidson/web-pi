@@ -75,7 +75,7 @@ upgrades in a real browser (headless Chromium via the playwright install in
   Spread `zodSchemaToHTMLAttributes(Schema)` (src/lib/web/zod.service.ts)
   onto the fields in the frontmatter.
 - Errors go in the field's **hint slot**: use
-  `src/components/form/WaInputField.astro` / `WaTextareaField.astro`. The
+  `src/components/form/WaField.astro` (`as="textarea"` for a textarea). The
   real `<input>` is in the wa-input's shadow DOM, so `aria-errormessage` /
   `aria-invalid` on the host never reach it; its `aria-describedby` points
   at the hint slot, so a message there is announced (e2e asserts this

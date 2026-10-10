@@ -8,6 +8,7 @@ import type { ActiveKey, ConsoleState, PastSession } from '../../lib/types';
 import { asPiSessionId, asTmuxSessionName, type PiSessionId, type TmuxSessionName } from '../../types/branded';
 import { TMUX_SESSION_NAME_RE } from '../../schemas/patterns';
 import { BASE } from '../../base';
+import { signedInFetch, type SignedInFetchFailure } from '../signed-in-fetch';
 import '@awesome.me/webawesome/dist/components/page/page.js';
 import '@awesome.me/webawesome/dist/components/button/button.js';
 import '@awesome.me/webawesome/dist/components/dialog/dialog.js';
@@ -57,10 +58,12 @@ export class ConsoleApp extends HTMLElement {
     });
     this.addEventListener('new-session', async e => {
       const name = (e as CustomEvent<string>).detail;
-      const r = await fetch(`${BASE}/api/new`, {
+      const sent = await signedInFetch(`${BASE}/api/new`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name }),
       });
+      if (!sent.ok) { this.notAnswered(sent); return; }
+      const r = sent.data.response;
       if (!r.ok) {
         const err = await r.json().catch(() => ({ error: 'could not create session' }));
         const msg = (err as { error?: string }).error ?? 'could not create session';
@@ -92,7 +95,8 @@ export class ConsoleApp extends HTMLElement {
     (this.querySelector('#confirm-hide-ok') as HTMLElement).onclick = () => void this.confirmHide();
     (this.querySelector('#unhide-all') as HTMLElement).onclick = () => void this.unhideAll();
     (this.querySelector('#logout') as HTMLElement).onclick = async () => {
-      await fetch(`${BASE}/logout`, { method: 'POST' });
+      const sent = await signedInFetch(`${BASE}/logout`, { method: 'POST' });
+      if (!sent.ok) { this.notAnswered(sent); return; }
       location.href = `${BASE}/login`;
     };
 
@@ -112,19 +116,26 @@ export class ConsoleApp extends HTMLElement {
     (this.querySelector('wa-toast') as WaToast | null)?.create(message, options);
   }
 
+  /** A request that got no answer. Signed out needs no toast: the page is
+   *  already on its way to /login. */
+  private notAnswered(failure: SignedInFetchFailure): void {
+    switch (failure.errorCode) {
+      case 'signed_out': return;
+      case 'network_error':
+        this.toast('network error — try again', { variant: 'danger', icon: 'triangle-exclamation', duration: 6000 });
+        return;
+      default: return failure satisfies never;
+    }
+  }
+
   /** POST JSON; toasts on failure. False → caller keeps its UI as-is. */
   private async post(path: string, body: Record<string, unknown>): Promise<boolean> {
-    let r: Response;
-    try {
-      r = await fetch(`${BASE}${path}`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-    } catch {
-      this.toast('network error — try again', { variant: 'danger', icon: 'triangle-exclamation', duration: 6000 });
-      return false;
-    }
-    if (r.status === 401) { location.href = `${BASE}/login`; return false; }
+    const sent = await signedInFetch(`${BASE}${path}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!sent.ok) { this.notAnswered(sent); return false; }
+    const r = sent.data.response;
     if (!r.ok) {
       this.toast('could not save — try again', { variant: 'danger', icon: 'triangle-exclamation', duration: 6000 });
       return false;
@@ -188,9 +199,9 @@ export class ConsoleApp extends HTMLElement {
   }
 
   async loadState(): Promise<void> {
-    let r: Response;
-    try { r = await fetch(`${BASE}/api/state`); } catch { return; }
-    if (r.status === 401) { location.href = `${BASE}/login`; return; }
+    const sent = await signedInFetch(`${BASE}/api/state`);
+    if (!sent.ok) return;
+    const r = sent.data.response;
     if (!r.ok) return;
     const st = await r.json() as ConsoleState;
     this.state = st;

@@ -158,7 +158,7 @@ is a type error.
 - Wrap the form in `<validation-enhancer-zod>` and give it the same schema
   the server validates with (`setZodSchema(Schema)`).
 - Put each field's error in its `hint` slot, via
-  `src/components/form/WaInputField.astro` / `WaTextareaField.astro`. The
+  `src/components/form/WaField.astro` (`as="textarea"` for a textarea). The
   inner input's `aria-describedby` points at the hint slot, so screen
   readers associate the message. An `aria-errormessage` on the `wa-input`
   host doesn't reach the inner input.

@@ -7,6 +7,7 @@
 // inside, so nothing re-hydrates). Events are delegated to this element.
 import type { UpdateResult } from '../../lib/types';
 import { BASE } from '../../base';
+import { signedInFetch, type SignedInFetchFailure } from '../signed-in-fetch';
 import '@awesome.me/webawesome/dist/components/card/card.js';
 import '@awesome.me/webawesome/dist/components/button/button.js';
 import '@awesome.me/webawesome/dist/components/icon/icon.js';
@@ -48,11 +49,28 @@ export class SettingsApp extends HTMLElement {
     });
   }
 
+  /** An action's failure, in its callout. */
+  private showError(callout: WaCalloutLike, message: string): void {
+    callout.variant = 'danger';
+    callout.textContent = message;
+    callout.classList.remove('hidden');
+  }
+
+  /** An action whose request got no answer. Signed out shows nothing: the
+   *  page is already on its way to /login. */
+  private notAnswered(callout: WaCalloutLike, failure: SignedInFetchFailure, prefix = 'request failed'): void {
+    switch (failure.errorCode) {
+      case 'signed_out': return;
+      case 'network_error': this.showError(callout, `${prefix}: ${failure.errorMessage ?? 'network error'}`); return;
+      default: return failure satisfies never;
+    }
+  }
+
   /** Re-render the data regions from the partial and re-apply the flags. */
   private async refresh(): Promise<void> {
-    let r: Response;
-    try { r = await fetch(`${BASE}/partials/settings`); } catch { return; }
-    if (r.status === 401) { location.href = `${BASE}/login`; return; }
+    const sent = await signedInFetch(`${BASE}/partials/settings`);
+    if (!sent.ok) return;
+    const r = sent.data.response;
     if (!r.ok) return;
     const fresh = new DOMParser().parseFromString(await r.text(), 'text/html');
     fresh.querySelectorAll<HTMLElement>('[data-refresh][id]').forEach(region => {
@@ -83,12 +101,17 @@ export class SettingsApp extends HTMLElement {
     result.classList.add('hidden');
     outputWrap.classList.add('hidden');
     try {
-      const res = await fetch(`${BASE}/api/update-pi`, {
+      const sent = await signedInFetch(`${BASE}/api/update-pi`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
       });
-      if (res.status === 401) { location.href = `${BASE}/login`; return; }
-      const r = await res.json() as UpdateResult;
-      if (r.ok && !r.dryRun && r.after !== r.before) {
+      if (!sent.ok) { this.notAnswered(result, sent); return; }
+      const res = sent.data.response;
+      // Not an UpdateResult (e.g. a proxy's error page): the status says it.
+      const r = await res.json().catch(() => null) as UpdateResult | null;
+      if (r === null) {
+        result.variant = 'danger';
+        result.textContent = `update failed (HTTP ${res.status})`;
+      } else if (r.ok && !r.dryRun && r.after !== r.before) {
         result.variant = 'success';
         result.textContent = `updated pi ${r.before ?? 'not installed'} → ${r.after ?? 'not installed'} — new sessions use it`;
         void this.refresh(); // npm may have re-pinned the declared range
@@ -99,11 +122,7 @@ export class SettingsApp extends HTMLElement {
         result.variant = 'danger';
         result.textContent = r.error ?? `update failed (HTTP ${res.status})`;
       }
-      if (r.output) { output.textContent = r.output; outputWrap.open = true; outputWrap.classList.remove('hidden'); }
-      result.classList.remove('hidden');
-    } catch (e) {
-      result.variant = 'danger';
-      result.textContent = `request failed: ${(e as Error).message}`;
+      if (r?.output) { output.textContent = r.output; outputWrap.open = true; outputWrap.classList.remove('hidden'); }
       result.classList.remove('hidden');
     } finally {
       updateBtn.loading = false;
@@ -121,18 +140,17 @@ export class SettingsApp extends HTMLElement {
     autoSwitch.disabled = true;
     autoResult.classList.add('hidden');
     try {
-      const res = await fetch(`${BASE}/api/auto-update-pi`, {
+      const sent = await signedInFetch(`${BASE}/api/auto-update-pi`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled }),
       });
-      if (res.status === 401) { location.href = `${BASE}/login`; return; }
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      if (enabled) this.$('auto-check-line').textContent = 'not checked yet — first check within a minute';
-    } catch (e) {
+      if (sent.ok && sent.data.response.ok) {
+        if (enabled) this.$('auto-check-line').textContent = 'not checked yet — first check within a minute';
+        return;
+      }
       autoSwitch.checked = !enabled; // the save failed — restore what's persisted
-      autoResult.variant = 'danger';
-      autoResult.textContent = `could not save the setting: ${(e as Error).message}`;
-      autoResult.classList.remove('hidden');
+      if (!sent.ok) this.notAnswered(autoResult, sent, 'could not save the setting');
+      else this.showError(autoResult, `could not save the setting: HTTP ${sent.data.response.status}`);
     } finally {
       autoSwitch.disabled = false;
     }
@@ -149,16 +167,14 @@ export class SettingsApp extends HTMLElement {
     logoutAllBtn.disabled = true;
     logoutResult.classList.add('hidden');
     try {
-      const res = await fetch(`${BASE}/api/logout-all`, {
+      const sent = await signedInFetch(`${BASE}/api/logout-all`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
       });
-      // 401 = the session already expired elsewhere — back to sign-in too.
-      if (res.ok || res.status === 401) { location.href = `${BASE}/login`; return; }
-      logoutResult.textContent = `log out everywhere failed (HTTP ${res.status})`;
-      logoutResult.classList.remove('hidden');
-    } catch (e) {
-      logoutResult.textContent = `request failed: ${(e as Error).message}`;
-      logoutResult.classList.remove('hidden');
+      // signed_out = the session already expired elsewhere — back to sign-in too.
+      if (!sent.ok) { this.notAnswered(logoutResult, sent); return; }
+      const res = sent.data.response;
+      if (res.ok) { location.href = `${BASE}/login`; return; }
+      this.showError(logoutResult, `log out everywhere failed (HTTP ${res.status})`);
     } finally {
       logoutAllBtn.loading = false;
       logoutAllBtn.disabled = false;

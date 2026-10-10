@@ -9,7 +9,7 @@ import '@awesome.me/webawesome/dist/components/input/input.js';
 import '@awesome.me/webawesome/dist/components/button/button.js';
 import '@awesome.me/webawesome/dist/components/callout/callout.js';
 import '@awesome.me/webawesome/dist/components/icon/icon.js';
-import WaInputField from '../components/form/WaInputField.astro';
+import WaField from '../components/form/WaField.astro';
 import { zodSchemaToHTMLAttributes } from '../lib/web/zod.service';
 import { loginForm } from '../schemas/api';
 
@@ -24,9 +24,9 @@ const validation = zodSchemaToHTMLAttributes(loginForm);
       <h1><wa-icon name="terminal"></wa-icon> web-pi</h1>
       <validation-enhancer-zod>
         <form id="login-form" class="wa-stack wa-gap-m">
-          <WaInputField id="username" name="username" label="username" autocomplete="username" autofocus
+          <WaField id="username" name="username" label="username" autocomplete="username" autofocus
             {...validation.username} />
-          <WaInputField
+          <WaField
             id="password"
             name="password"
             label="password"
