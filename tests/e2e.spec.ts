@@ -141,6 +141,36 @@ test('bad credentials show the danger callout', async ({ page }) => {
   await expect(page.locator('wa-callout#error:not(.hidden)')).toContainText('invalid credentials');
 });
 
+test('the login form validates in the browser: empty fields show their messages, nothing is POSTed', async ({ page }) => {
+  // Client-side validation (validation-enhancer-zod + the loginForm schema)
+  // — an empty field never costs a request, so this spends nothing from the
+  // suite's login budget.
+  const posts: string[] = [];
+  page.on('request', r => { if (r.method() === 'POST') posts.push(r.url()); });
+  await page.goto('/login');
+  await page.waitForFunction(() => customElements.get('validation-enhancer-zod') !== undefined);
+  await page.click('wa-button:has-text("sign in")');
+  await expect(page.locator('#username-error')).toHaveText('enter your username');
+  await expect(page.locator('#password-error')).toHaveText('enter your password');
+  expect(posts).toEqual([]);
+  // The message lives in the wa-input's hint slot: the REAL input inside
+  // the shadow DOM is described by it (aria-errormessage on the host would
+  // never reach it), and the hint is not aria-hidden.
+  await expect(page.locator('wa-input#username input')).toHaveAccessibleDescription('enter your username');
+  const hint = await page.evaluate(() => {
+    const host = document.getElementById('username')!;
+    const input = host.shadowRoot!.querySelector('input')!;
+    const slot = host.shadowRoot!.getElementById(input.getAttribute('aria-describedby') ?? '');
+    return slot?.getAttribute('aria-hidden') ?? 'missing';
+  });
+  expect(hint).toBe('false');
+  // Correcting a field clears its message (validated on focus-out).
+  await page.fill('wa-input#username input', USERNAME);
+  await page.locator('wa-input#password input').focus();
+  await expect(page.locator('#username-error')).toHaveText('');
+  expect(posts).toEqual([]);
+});
+
 test('login lands on the console with fixture sessions in the sidebar', async ({ page }) => {
   await login(page);
   await expect(page.locator('console-app wa-page')).toHaveCount(1);
@@ -429,6 +459,32 @@ test('jobs: validate, save, run now, delete', async ({ page }) => {
   expect((await api(page, 'GET', '/api/jobs')).json.jobs).toEqual([]);
   expect(live()).toContain('webpi-itest-job');
   execFileSync('tmux', ['-L', TMUX_SOCKET, 'kill-session', '-t', 'webpi-itest-job']);
+});
+
+test('the jobs dialog validates against the shared schema: per-field errors, no request until valid', async ({ page }) => {
+  await login(page);
+  await page.goto('/jobs');
+  await page.waitForFunction(() => customElements.get('validation-enhancer-zod') !== undefined);
+  const saves: string[] = [];
+  page.on('request', r => { if (r.method() === 'POST' && new URL(r.url()).pathname === '/api/jobs') saves.push(r.url()); });
+  await page.click('#jobs-new');
+  await expect(page.locator('wa-input#job-name input')).toBeVisible();
+  await page.click('#job-save');
+  await expect(page.locator('#job-name-error')).toHaveText('name is required');
+  await expect(page.locator('#job-schedule-error')).toHaveText('schedule is required');
+  await expect(page.locator('#job-command-error')).toHaveText('command is required');
+  expect(saves).toEqual([]);
+  // The name is normalized by the schema, client and server alike.
+  await page.fill('wa-input#job-name input', 'Form Check');
+  await page.fill('wa-input#job-schedule input', '*/5 * * * *');
+  await page.fill('wa-textarea#job-command textarea', 'true');
+  await page.click('#job-save');
+  await expect(page.locator('jobs-app .job-name')).toContainText('form-check');
+  expect(saves.length).toBe(1);
+  // Re-opening the dialog starts clean.
+  await page.click('#jobs-new');
+  await expect(page.locator('#job-name-error')).toHaveText('');
+  expect((await api(page, 'DELETE', '/api/jobs/form-check')).status).toBe(200);
 });
 
 test('jobs persist across a server restart; missed runs catch up', async () => {

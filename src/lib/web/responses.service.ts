@@ -71,9 +71,6 @@ export type JobFailure = SaveJobFailure | DeleteJobFailure | RunJobFailure | Lis
 export function jobFailureResponse(f: JobFailure): Response {
   const body = (error: string, detail: string | null = null) => ({ error, detail, code: f.errorCode });
   switch (f.errorCode) {
-    case 'invalid_job_name':
-    case 'command_required':
-    case 'invalid_command':
     case 'invalid_schedule':
       return jsonResponse(body(f.errorMessage ?? f.errorCode), 400);
     case 'job_not_found':

@@ -66,6 +66,32 @@ adding a `wa-*` element to a page, verify it
 upgrades in a real browser (headless Chromium via the playwright install in
 `~/projects/validation-enhancer` works), not just in the SSR HTML.
 
+### Forms on wa-* controls
+
+- Validation: wrap the `<form>` in `<validation-enhancer-zod>` (import
+  `validation-enhancer/zod` client-side) and hand it the schema the
+  server parses with: `setZodSchema(Schema)` once
+  `customElements.whenDefined('validation-enhancer-zod')` resolves.
+  Spread `zodSchemaToHTMLAttributes(Schema)` (src/lib/web/zod.service.ts)
+  onto the fields in the frontmatter.
+- Errors go in the field's **hint slot**: use
+  `src/components/form/WaInputField.astro` / `WaTextareaField.astro`. The
+  real `<input>` is in the wa-input's shadow DOM, so `aria-errormessage` /
+  `aria-invalid` on the host never reach it; its `aria-describedby` points
+  at the hint slot, so a message there is announced (e2e asserts this
+  with `toHaveAccessibleDescription`).
+- Listen for `submit` on an element **above** the enhancer. It stops an
+  invalid submit from propagating; a listener on the form itself fires
+  (target phase) before validation runs. A button outside the form (e.g.
+  a `wa-dialog` footer) calls `form.requestSubmit()`.
+- An empty `wa-input`'s `.value` is `null`, not `''`.
+- **No JS, no wa-* forms:** without upgrading, a `wa-input` still renders
+  (declarative shadow DOM) and accepts typing, but its input is inside the
+  shadow root and has no `name`, so a native submit carries none of its
+  value (verified in Chromium with JS disabled). A form that must work
+  without JS uses native `<input>`/`<button>`, which `webawesome.css`
+  already styles (it includes `native.css`).
+
 ## UI conventions
 
 - New UI goes on Web Awesome components/utilities/tokens, not hand-rolled

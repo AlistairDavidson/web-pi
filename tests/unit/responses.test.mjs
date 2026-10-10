@@ -27,7 +27,7 @@ test('failureResponse: parse, validation and upload codes', () => {
 test('jobFailureResponse: every jobs code → status, with the { error, detail } body /jobs reads', async () => {
   const session = 'webpi-nightly';
   const cases = [
-    ['invalid_job_name', 400], ['command_required', 400], ['invalid_command', 400], ['invalid_schedule', 400],
+    ['invalid_schedule', 400],
     ['job_not_found', 404], ['run_active', 409], ['tmux_error', 500], ['database_error', 500],
   ];
   for (const [code, status] of cases) {

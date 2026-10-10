@@ -7,6 +7,14 @@ import "@awesome.me/webawesome/dist/components/dialog/dialog.js";
 import "@awesome.me/webawesome/dist/components/input/input.js";
 import "@awesome.me/webawesome/dist/components/textarea/textarea.js";
 import "@awesome.me/webawesome/dist/components/toast/toast.js";
+import WaInputField from "../form/WaInputField.astro";
+import WaTextareaField from "../form/WaTextareaField.astro";
+import { zodSchemaToHTMLAttributes } from "../../lib/web/zod.service";
+import { JobSaveSchema } from "../../schemas/jobs";
+
+// Native constraints matching the schema the dialog validates with
+// (client: validation-enhancer-zod in jobs-app.ts; server: POST /api/jobs).
+const validation = zodSchemaToHTMLAttributes(JobSaveSchema);
 ---
 
 <jobs-app>
@@ -35,34 +43,42 @@ import "@awesome.me/webawesome/dist/components/toast/toast.js";
   </div>
 
   <wa-dialog id="job-dialog" label="new job" with-footer>
-    <form id="job-form" class="wa-stack wa-gap-s" novalidate>
-      <wa-input
-        id="job-name"
-        label="name"
-        placeholder="nightly-check"
-        maxlength="40"
-        hint="runs open in tmux session webpi-<name>"
-      ></wa-input>
-      <div>
-        <wa-input
-          id="job-schedule"
-          label="schedule (cron)"
-          placeholder="*/5 * * * *"
-          hint="*/5 * * * * · 0 8 * * * · 30 9 * * 1-5"
-        ></wa-input>
-        <div
-          id="schedule-feedback"
-          class="schedule-feedback"
-          aria-live="polite"
-        ></div>
-      </div>
-      <wa-textarea
-        id="job-command"
-        label="command (shell; runs in tmux session webpi-<name>)"
-        placeholder='pi -p "summarize today&apos;s commits"'
-        rows="3"
-      ></wa-textarea>
-    </form>
+    <validation-enhancer-zod>
+      <form id="job-form" class="wa-stack wa-gap-s" novalidate>
+        <WaInputField
+          id="job-name"
+          name="name"
+          label="name"
+          placeholder="nightly-check"
+          maxlength="40"
+          hint="runs open in tmux session webpi-<name>"
+          {...validation.name}
+        />
+        <div>
+          <WaInputField
+            id="job-schedule"
+            name="schedule"
+            label="schedule (cron)"
+            placeholder="*/5 * * * *"
+            hint="*/5 * * * * · 0 8 * * * · 30 9 * * 1-5"
+            {...validation.schedule}
+          />
+          <div
+            id="schedule-feedback"
+            class="schedule-feedback"
+            aria-live="polite"
+          ></div>
+        </div>
+        <WaTextareaField
+          id="job-command"
+          name="command"
+          label="command (shell; runs in tmux session webpi-<name>)"
+          placeholder={'pi -p "summarize today\'s commits"'}
+          rows="3"
+          {...validation.command}
+        />
+      </form>
+    </validation-enhancer-zod>
     <wa-button slot="footer" appearance="plain" data-dialog="close">
       cancel
     </wa-button>

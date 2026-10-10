@@ -39,6 +39,7 @@
     "astro": "^7.0.0",
     "cron-parser": "^5.10.1",
     "node-pty": "^1.0.0",
+    "validation-enhancer": "^1.0.6",
     "ws": "^8.18.0",
     "zod": "^4.6.5"
   },
