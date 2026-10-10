@@ -1,8 +1,9 @@
 // db.ts — web-pi's persisted state: one SQLite file (node:sqlite).
 //
 // Everything the app itself writes lives in ENV.WEB_PI_DB_FILE (default
-// <state dir>/webpi.db): the login credential (single row), a `sessions`
-// overlay table, the scheduled-jobs tables (`jobs` definitions,
+// <state dir>/webpi.db): the login credential (single row), the login
+// sessions (`auth_sessions` — token hashes only, src/lib/auth.ts), a
+// `sessions` overlay table, the scheduled-jobs tables (`jobs` definitions,
 // `job_runs` bookkeeping — src/lib/jobs.ts), and a small `settings` kv
 // (src/lib/auto-update.ts). pi's own store (sessions/,
 // provider creds under WEB_PI_AGENT_DIR) is not web-pi state and stays
@@ -114,6 +115,15 @@ const SCHEMA = `
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
   );
+  -- Login sessions (src/lib/auth.ts), so a restart doesn't sign everyone
+  -- out. Keyed by sha256(token): the raw token never touches disk, so a
+  -- copied db (or backup) holds nothing a browser could present.
+  CREATE TABLE IF NOT EXISTS auth_sessions (
+    token_hash TEXT    PRIMARY KEY,  -- hex sha256 of the cookie token
+    created_at INTEGER NOT NULL,     -- epoch ms of login: the absolute cap's origin
+    expires_at INTEGER NOT NULL,     -- sliding idle expiry (renewal writes throttled)
+    cookie_at  INTEGER NOT NULL      -- when a Set-Cookie last re-armed the browser's Max-Age
+  );
 `;
 
 /** web-pi's state database: a lazily-opened node:sqlite connection (see
@@ -136,11 +146,12 @@ export class StateDb {
       db.exec('PRAGMA busy_timeout = 3000');
       db.exec(SCHEMA);
       // user_version: 1 = credential + sessions; 2 adds the job tables;
-      // 3 adds the settings kv table (additive — the CREATE IF NOT EXISTS
-      // block above brings any older db up to v3 shape; nothing is dropped).
+      // 3 adds the settings kv table; 4 adds auth_sessions (additive — the
+      // CREATE IF NOT EXISTS block above brings any older db up to v4
+      // shape; nothing is dropped).
       const v = db.prepare('PRAGMA user_version').get() as { user_version: number };
-      if (v.user_version < 3) db.exec('PRAGMA user_version = 3');
-      else if (v.user_version > 3) {
+      if (v.user_version < 4) db.exec('PRAGMA user_version = 4');
+      else if (v.user_version > 4) {
         throw new Error(`state db ${this.file} is schema v${v.user_version} — newer than this build understands`);
       }
       if (fresh) fs.chmodSync(this.file, 0o600); // it holds the password hash

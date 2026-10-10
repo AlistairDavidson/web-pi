@@ -51,8 +51,9 @@ containers and two uids (server vs tmux/pi) — see
   declared range.
 - **Single-user login** — username + password, salted scrypt hash in the
   sqlite state db (`webpi.db`), `HttpOnly`/`Secure`/`SameSite=Strict`
-  session cookie. No account machinery. Fails closed until the credential
-  exists.
+  session cookie. Sessions persist across server restarts (only token
+  hashes are stored). No account machinery. Fails closed until the
+  credential exists.
 
 ## Requirements
 
@@ -419,7 +420,8 @@ one — the same shape on a VPS and on EC2.
 **Web restarts no longer end live sessions; workspace restarts still do.**
 tmux lives in the workspace container, so a web-pi deploy, crash or OOM
 leaves every session running (open terminals get the `restart` message,
-reconnect, and reattach to the same tmux sessions — nothing died). Any
+reconnect, and reattach to the same tmux sessions — nothing died; login
+sessions live in the state db, so nobody has to sign in again). Any
 *workspace* container stop (crash, OOM, host reboot, deliberate
 `docker compose stop workspace`) kills the running sessions with it. A
 *deliberate* stop is still graceful for the web half: every open terminal
@@ -565,6 +567,14 @@ edits and the future apply step builds from.
   selects — never the client-supplied leftmost entry. Password hashing runs
   off the event loop, at most 4 at once (more get 503), so a login flood
   can't stall attached terminals.
+- Login sessions last 7 days idle and at most 30 days from sign-in. They
+  persist in the state db (`auth_sessions`, file mode 0600) as SHA-256
+  hashes of the cookie token, never the token itself, so a copied db or
+  backup can't sign anyone in, and a server restart doesn't sign anyone
+  out. "Log out everywhere" (`/settings`) and a password change
+  (`npm run set-password`) revoke every session; open terminals end
+  within 30 s. The login rate limiter stays in memory (a restart resets
+  it).
 - **Serving and working are privilege-split by default in containers**
   ([DESIGN_REVIEW.md](DESIGN_REVIEW.md) §1.1): pi reads untrusted input
   (repos, web pages, tool output), so a prompt injection must not be able
