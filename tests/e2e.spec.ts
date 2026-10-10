@@ -1051,7 +1051,7 @@ test('SIGTERM: every socket gets restart, closes, and the process exits 0', asyn
   // own port + tmp dir so nothing collides with the shared instance).
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webpi-sigterm-'));
   const dbFile = path.join(dir, 'webpi.db');
-  setCredential(new StateDb(dbFile), USERNAME, PASSWORD);
+  expect(setCredential(new StateDb(dbFile), USERNAME, PASSWORD).ok).toBe(true);
   const port = 3481;
   // Per-run socket: a server left over from an interrupted run would hold
   // the sig-live session name and /api/new would 409.

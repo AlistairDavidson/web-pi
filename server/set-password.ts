@@ -59,6 +59,7 @@ function readPiped(): Promise<string[]> {
   if (!username) { console.error('username required'); process.exit(1); }
   if (!pw || pw.length < 8) { console.error('password must be >= 8 chars'); process.exit(1); }
   if (pw !== pw2) { console.error('passwords do not match'); process.exit(1); }
-  setCredential(stateDb, username, pw);
+  const saved = setCredential(stateDb, username, pw);
+  if (!saved.ok) { console.error(saved.errorMessage); process.exit(1); }
   console.log('written:', ENV.WEB_PI_DB_FILE);
 })();

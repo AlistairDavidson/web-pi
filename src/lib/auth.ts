@@ -10,7 +10,7 @@
 // closed on any db read error. Changing the password (setCredential)
 // revokes every session.
 import * as crypto from 'node:crypto';
-import { databaseUpdate, type StateDb } from './db';
+import { databaseRead, databaseUpdate, type DatabaseReadSuccess, type StateDb } from './db';
 import type { ResultFailure, ResultSuccess } from '../types/result';
 import { asSessionToken, type SessionToken } from '../types/branded';
 
@@ -49,6 +49,33 @@ export type NewSessionErrorCode = 'database_error';
 export type NewSessionSuccess = ResultSuccess<'new_session', { token: SessionToken }>;
 export type NewSessionFailure = ResultFailure<'new_session', { token: SessionToken }, NewSessionErrorCode>;
 
+/** no_session: no cookie, an unknown token, or one dead on either clock
+ *  (401 / signed-out). database_error: the session store could not be
+ *  read — the caller fails closed WITHOUT claiming the session ended (503
+ *  on HTTP and WS upgrades; the WS liveness sweep re-checks next tick). */
+export type SessionCheckErrorCode = 'no_session' | 'database_error';
+export type SessionCheckData = { token: SessionToken };
+export type SessionCheckSuccess = ResultSuccess<'session_check', SessionCheckData>;
+export type SessionCheckFailure = ResultFailure<'session_check', SessionCheckData, SessionCheckErrorCode>;
+export type SessionCheckResult = SessionCheckSuccess | SessionCheckFailure;
+
+/** invalid_credentials: wrong username or password, or no credential set
+ *  yet — answered alike (401, which fail2ban counts). database_error: the
+ *  credential could not be read (503 — never a 401, so a db hiccup can't
+ *  count toward a ban). */
+export type VerifyLoginErrorCode = 'invalid_credentials' | 'database_error';
+export type VerifyLoginData = { username: string };
+export type VerifyLoginSuccess = ResultSuccess<'verify_login', VerifyLoginData>;
+export type VerifyLoginFailure = ResultFailure<'verify_login', VerifyLoginData, VerifyLoginErrorCode>;
+export type VerifyLoginResult = VerifyLoginSuccess | VerifyLoginFailure;
+
+const noSession = () =>
+  ({ ok: false, resultType: 'session_check', errorCode: 'no_session', errorMessage: 'no such session' }) satisfies SessionCheckFailure;
+const sessionStoreFailure = (errorMessage: string) =>
+  ({ ok: false, resultType: 'session_check', errorCode: 'database_error', errorMessage }) satisfies SessionCheckFailure;
+const sessionFound = (token: SessionToken) =>
+  ({ ok: true, resultType: 'session_check', data: { token } }) satisfies SessionCheckSuccess;
+
 /** What the db stores for a token: the raw token never touches disk. */
 function tokenHash(token: SessionToken): string {
   return crypto.createHash('sha256').update(token).digest('hex');
@@ -65,30 +92,45 @@ export class Auth {
     this.renewWriteMs = ttls.renewWriteMs ?? RENEW_WRITE_MS;
   }
 
-  configured(): boolean { return this.readCred() !== null; }
+  /** Is a credential set? (database_read: value true/false.) */
+  configured() {
+    const cred = this.readCred();
+    if (!cred.ok) return cred;
+    return { ok: true, resultType: 'database_read', data: { value: cred.data.value !== null } } satisfies DatabaseReadSuccess<boolean>;
+  }
 
-  /** Current credential row, or null when unset/unreadable. Read per
-   *  attempt, exactly like the old cred file: a credential written after
-   *  boot (set-password, test fixtures) is picked up with no restart. */
-  private readCred(): Cred | null {
-    try {
+  /** Current credential row (value null when unset or malformed). Read
+   *  per attempt, exactly like the old cred file: a credential written
+   *  after boot (set-password, test fixtures) is picked up with no
+   *  restart. An unreadable db is a database_error, not "unset" — callers
+   *  fail closed without calling it a wrong password. */
+  private readCred() {
+    return databaseRead('could not read the credential', (): Cred | null => {
       const row = this.state.stmt('SELECT username, salt, hash FROM credential WHERE id = 1')
         .get() as Partial<Cred> | undefined;
       if (!row || typeof row.username !== 'string' || typeof row.salt !== 'string'
         || typeof row.hash !== 'string') return null;
       return { username: row.username, salt: row.salt, hash: row.hash };
-    } catch {
-      return null; // missing/unreadable db — fail closed, like a missing file
-    }
+    });
   }
 
   /** Async scrypt: the hash runs on the libuv threadpool, so login attempts
    *  never stall the event loop (and every attached terminal with it). The
    *  hash runs even when the username is wrong — skipping it would make a
    *  wrong username measurably faster than a wrong password. */
-  async verify(username: string, password: string): Promise<boolean> {
-    const cred = this.readCred();
-    if (!cred) return false;
+  async verify(username: string, password: string) {
+    const data = { username };
+    const read = this.readCred();
+    if (!read.ok) {
+      return {
+        ok: false, resultType: 'verify_login', data, errorCode: 'database_error', errorMessage: read.errorMessage,
+      } satisfies VerifyLoginFailure;
+    }
+    const invalid = {
+      ok: false, resultType: 'verify_login', data, errorCode: 'invalid_credentials', errorMessage: 'invalid credentials',
+    } satisfies VerifyLoginFailure;
+    const cred = read.data.value;
+    if (!cred) return invalid;
     const uBuf = Buffer.from(username, 'utf8');
     const uExpect = Buffer.from(cred.username, 'utf8');
     const uOk = uBuf.length === uExpect.length && crypto.timingSafeEqual(uBuf, uExpect);
@@ -97,7 +139,8 @@ export class Auth {
       crypto.scrypt(password, Buffer.from(cred.salt, 'hex'), SCRYPT.keylen, SCRYPT,
         (err, key) => (err ? reject(err) : resolve(key))));
     const pOk = expect.length === got.length && crypto.timingSafeEqual(expect, got);
-    return uOk && pOk;
+    if (!(uOk && pOk)) return invalid;
+    return { ok: true, resultType: 'verify_login', data } satisfies VerifyLoginSuccess;
   }
 
   /** Mint a token for a fresh login and persist its hash; purges rows
@@ -120,16 +163,13 @@ export class Auth {
     return { ok: true, resultType: 'new_session', data: { token } } satisfies NewSessionSuccess;
   }
 
-  /** The token's row; null when unknown — or when the db can't be read
-   *  (fail closed: an unreadable session store authenticates nobody). */
-  private row(token: SessionToken): SessionRow | null {
-    try {
-      const r = this.state.stmt('SELECT created_at, expires_at, cookie_at FROM auth_sessions WHERE token_hash = ?')
-        .get(tokenHash(token)) as SessionRow | undefined;
-      return r ?? null;
-    } catch {
-      return null;
-    }
+  /** The token's row (value null when unknown). An unreadable session
+   *  store is a database_error — never read as "unknown", which would
+   *  sign people out over a db hiccup. */
+  private row(token: SessionToken) {
+    return databaseRead('could not read the session', () =>
+      (this.state.stmt('SELECT created_at, expires_at, cookie_at FROM auth_sessions WHERE token_hash = ?')
+        .get(tokenHash(token)) as SessionRow | undefined) ?? null);
   }
 
   /** Expired on either clock — idle, or past the absolute cap from login. */
@@ -138,12 +178,15 @@ export class Auth {
   }
 
   /** Validate a token; sliding renewal on use, bounded by the absolute cap. */
-  valid(token: SessionToken | undefined): boolean {
-    if (!token) return false;
-    const s = this.row(token);
-    if (!s) return false;
+  valid(token: SessionToken | undefined) {
+    if (!token) return noSession();
+    const found = this.row(token);
+    if (!found.ok) return sessionStoreFailure(found.errorMessage);
+    const s = found.data.value;
+    if (!s) return noSession();
     const now = Date.now();
-    if (this.dead(s, now)) { this.drop(token); return false; }
+    // The purge is best-effort: a dead token is rejected either way.
+    if (this.dead(s, now)) { this.drop(token); return noSession(); }
     const exp = now + this.idleMs;
     if (exp - s.expires_at >= this.renewWriteMs) {
       // A failed renewal write only means the token keeps its previous
@@ -151,7 +194,7 @@ export class Auth {
       databaseUpdate('could not renew the session', () =>
         this.state.stmt('UPDATE auth_sessions SET expires_at = ? WHERE token_hash = ?').run(exp, tokenHash(token)));
     }
-    return true;
+    return sessionFound(token);
   }
 
   /** Sign one token out. A failed delete is reported: the caller must
@@ -168,10 +211,13 @@ export class Auth {
    *  cap, or a logout — is closed by the server's sweep instead of
    *  riding the WS keepalive forever. Pure peek: a read, never a write
    *  (the next authed HTTP touch or newSession purge does the deleting). */
-  alive(token: SessionToken | undefined): boolean {
-    if (!token) return false;
-    const s = this.row(token);
-    return !!s && !this.dead(s, Date.now());
+  alive(token: SessionToken | undefined) {
+    if (!token) return noSession();
+    const found = this.row(token);
+    if (!found.ok) return sessionStoreFailure(found.errorMessage);
+    const s = found.data.value;
+    if (!s || this.dead(s, Date.now())) return noSession();
+    return sessionFound(token);
   }
 
   /** 'Log out everywhere': every token dies (their sockets are closed by
@@ -197,7 +243,11 @@ export class Auth {
    *  unknown token answers null (no header) rather than a stale one. */
   cookieRefresh(token: SessionToken | undefined, path = '/'): string | null {
     if (!token) return null;
-    const s = this.row(token);
+    // Can't fail by design: the re-arm is opportunistic, so any failure
+    // (unknown token, unreadable store) just sends no header this poll.
+    const found = this.row(token);
+    if (!found.ok) return null;
+    const s = found.data.value;
     if (!s) return null;
     const now = Date.now();
     if (this.dead(s, now)) return null;
@@ -267,24 +317,30 @@ export class RateLimiter {
 /** Credential writer used by set-password (and the e2e fixtures). A new
  *  credential revokes every login session in the same transaction —
  *  whoever held the old password is signed out; open terminals close on
- *  the server's next liveness sweep (≤ 30 s). Throws on db failure (the
- *  set-password CLI reports it and exits non-zero). */
-export function setCredential(state: StateDb, username: string, password: string): void {
+ *  the server's next liveness sweep (≤ 30 s). A db failure is a
+ *  database_error (the set-password CLI prints it and exits non-zero);
+ *  nothing is half-written. */
+export function setCredential(state: StateDb, username: string, password: string) {
   const salt = crypto.randomBytes(16);
   const hash = crypto.scryptSync(password, salt, SCRYPT.keylen, SCRYPT);
-  const db = state.db();
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    state.stmt(`INSERT INTO credential (id, username, salt, hash, updated_at)
-                VALUES (1, ?, ?, ?, ?)
-                ON CONFLICT (id) DO UPDATE SET
-                  username = excluded.username, salt = excluded.salt,
-                  hash = excluded.hash, updated_at = excluded.updated_at`)
-      .run(username, salt.toString('hex'), hash.toString('hex'), Date.now());
-    state.stmt('DELETE FROM auth_sessions').run();
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
+  return databaseUpdate('could not save the credential', () => {
+    const db = state.db();
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const written = state.stmt(`INSERT INTO credential (id, username, salt, hash, updated_at)
+                                  VALUES (1, ?, ?, ?, ?)
+                                  ON CONFLICT (id) DO UPDATE SET
+                                    username = excluded.username, salt = excluded.salt,
+                                    hash = excluded.hash, updated_at = excluded.updated_at`)
+        .run(username, salt.toString('hex'), hash.toString('hex'), Date.now());
+      state.stmt('DELETE FROM auth_sessions').run();
+      db.exec('COMMIT');
+      return written;
+    } catch (err) {
+      // Some sqlite errors already ended the transaction; a failing
+      // ROLLBACK then must not mask the error that matters.
+      try { db.exec('ROLLBACK'); } catch { /* no transaction left */ }
+      throw err; // to databaseUpdate's boundary catch, as database_error
+    }
+  });
 }

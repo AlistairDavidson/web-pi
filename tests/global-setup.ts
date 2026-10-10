@@ -14,7 +14,8 @@ export default function globalSetup(): void {
 
   // Login credential in the state db (Auth reads the row per attempt;
   // the server opens the db lazily — only after this reset).
-  setCredential(new StateDb(path.join(WORKSPACE, 'webpi.db')), USERNAME, PASSWORD);
+  const saved = setCredential(new StateDb(path.join(WORKSPACE, 'webpi.db')), USERNAME, PASSWORD);
+  if (!saved.ok) throw new Error(`global-setup: ${saved.errorMessage}`);
 
   // Deterministic command for new/resumed sessions: banner + a shell we can
   // type into. WEB_PI_COMMAND is whitespace-split, so it must be one path.

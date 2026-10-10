@@ -325,9 +325,6 @@ function originOk(req: http.IncomingMessage): boolean {
 function underBase(url: string): boolean {
   return CFG.base === '/' || url === CFG.base || url.startsWith(CFG.base + '/');
 }
-function authed(req: http.IncomingMessage): boolean {
-  return auth.valid(Auth.sessionToken(req.headers.cookie));
-}
 /** Header that clears the browser's session cookie (logout, log out everywhere). */
 const clearSessionCookie = (): string =>
   `webpi_session=; HttpOnly; Secure; SameSite=Strict; Path=${CFG.base}; Max-Age=0`;
@@ -433,8 +430,19 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
       }
       loginVerifying++;
       auth.verify(username, password)
-        .then(ok => {
-          if (!ok) { send(res, 401, 'invalid credentials'); return; }
+        .then(verified => {
+          if (!verified.ok) {
+            switch (verified.errorCode) {
+              case 'invalid_credentials': send(res, 401, 'invalid credentials'); return;
+              // Not a 401: fail2ban counts those, and a db hiccup is no
+              // failed login. The login page reads 503 as "try again".
+              case 'database_error':
+                console.error(verified.errorMessage);
+                send(res, 503, 'busy, try again', { 'Retry-After': '1' });
+                return;
+              default: verified satisfies never; return;
+            }
+          }
           const session = auth.newSession();
           if (!session.ok) { console.error(session.errorMessage); send(res, 500, 'internal error'); return; }
           send(res, 200, 'ok', { 'Set-Cookie': auth.cookieHeader(session.data.token, CFG.base) });
@@ -474,7 +482,8 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
   }
 
   // Everything below requires a valid session...
-  if (!authed(req)) {
+  const session = auth.valid(Auth.sessionToken(req.headers.cookie));
+  if (!session.ok) {
     // ...except the PWA offline shell (static, session-free — the service
     // worker precaches it at install time, pre-auth), the hashed assets,
     // and the login page itself. Every data/terminal route stays 401.
@@ -485,6 +494,17 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
     if (req.method === 'GET' && url.startsWith(route('/_astro/'))) {
       sendClientFile(res, url.slice(CFG.base.length), true);
       return;
+    }
+    switch (session.errorCode) {
+      case 'no_session': break;
+      // Unreadable session store: fail closed, but don't claim the
+      // session ended — no login page, no 401 (the console would bounce
+      // to /login and a terminal would read it as signed out).
+      case 'database_error':
+        console.error(session.errorMessage);
+        send(res, 503, 'session store unavailable, try again', { 'Retry-After': '5' });
+        return;
+      default: session satisfies never;
     }
     // Any other page GET under the base (/, /jobs, /settings, a typo'd
     // path, …) renders the login page in place — the address bar keeps
@@ -527,8 +547,10 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
       const live = await tmux.listSessions();
       const hidden = hiddenSessions.hiddenIds();
       if (!hidden.ok) { sendJSON(res, 500, { error: hidden.errorMessage }); return; }
+      const configured = auth.configured();
+      if (!configured.ok) { sendJSON(res, 500, { error: configured.errorMessage }); return; }
       const state: ConsoleState = {
-        me: 'ok', configured: auth.configured(),
+        me: 'ok', configured: configured.data.value,
         live,
         sessions: sessList.map(s => ({ ...s, hidden: hidden.data.value.has(s.id) })),
         hiddenCount: hidden.data.value.size,
@@ -803,12 +825,20 @@ server.on('upgrade', (req, socket, head) => {
   const origin = req.headers.origin;
   if (!origin || !originOk(req)) { socket.destroy(); return; }
   const token = Auth.sessionToken(req.headers.cookie);
-  if (!auth.valid(token)) {
-    socket.write(`HTTP/1.1 401 Unauthorized\r\n${securityHeaderBlock()}\r\n`);
+  const session = auth.valid(token);
+  if (!session.ok) {
+    let status: string;
+    switch (session.errorCode) {
+      case 'no_session': status = '401 Unauthorized'; break;
+      // Fail closed without calling it signed out (same as HTTP's 503).
+      case 'database_error': console.error(session.errorMessage); status = '503 Service Unavailable'; break;
+      default: return session satisfies never;
+    }
+    socket.write(`HTTP/1.1 ${status}\r\n${securityHeaderBlock()}\r\n`);
     socket.destroy();
     return;
   }
-  wss.handleUpgrade(req, socket, head, ws => attach(ws, token!));
+  wss.handleUpgrade(req, socket, head, ws => attach(ws, session.data.token));
 });
 
 interface Pty { write(d: string): void; resize(c: number, r: number): void; kill(): void;
@@ -929,7 +959,17 @@ function attach(ws: WebSocket, token: SessionToken): void {
     // is a live shell; the token dying for HTTP must end it too).
     // Non-renewing on purpose (auth.alive): WS traffic never slides a
     // token — only authed HTTP does, via auth.valid.
-    if (!auth.alive(token)) { closeTokenSockets(token, { type: 'signed-out' }); return; }
+    const live = auth.alive(token);
+    if (!live.ok) {
+      switch (live.errorCode) {
+        case 'no_session': closeTokenSockets(token, { type: 'signed-out' }); return;
+        // Unreadable session store: can't tell, so don't sign the terminal
+        // out over a db hiccup — its token was alive at the last sweep;
+        // re-check next tick (the peer-liveness ping below still runs).
+        case 'database_error': console.error(live.errorMessage); break;
+        default: live satisfies never;
+      }
+    }
     alive = false;
     try { ws.ping(); } catch { /* closing */ }
   }, PING_INTERVAL_MS);

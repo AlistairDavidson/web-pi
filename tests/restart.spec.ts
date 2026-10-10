@@ -63,7 +63,7 @@ async function stop(child: ChildProcess): Promise<void> {
 test('a login survives a server restart; a password change revokes it', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webpi-restart-'));
   const dbFile = path.join(dir, 'webpi.db');
-  setCredential(new StateDb(dbFile), USERNAME, PASSWORD);
+  expect(setCredential(new StateDb(dbFile), USERNAME, PASSWORD).ok).toBe(true);
 
   let child = await boot(dir);
   try {
@@ -86,7 +86,7 @@ test('a login survives a server restart; a password change revokes it', async ()
     expect((await state()).status).toBe(200);
 
     // A password change (what `npm run set-password` does) signs it out.
-    setCredential(new StateDb(dbFile), USERNAME, 'another-horse-9');
+    expect(setCredential(new StateDb(dbFile), USERNAME, 'another-horse-9').ok).toBe(true);
     expect((await state()).status).toBe(401);
   } finally {
     await stop(child);
