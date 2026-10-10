@@ -53,6 +53,9 @@ playwright fuzzer? fuzz based integration testing
 ## Distribution
 installation instructions / script for agents / actual scripts
 
+## Packaging
+Pull my typescript and astro and zod stuff out to packages
+
 ## Human UX tasks
 make sidebar much nicer - rebuild step by step
 Skills and other methods to enforce my coding patterns
