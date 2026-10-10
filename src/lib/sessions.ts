@@ -9,6 +9,7 @@ import * as fs from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import * as path from 'node:path';
 import type { PastSession } from './types';
+import { asPiSessionId, type PiSessionId } from '../types/branded';
 
 const MAX_FILES = 200;             // newest N across all scopes
 const HEADER_BYTES = 4096;         // cap read per file for the header line
@@ -98,7 +99,8 @@ async function readSessionEntry(file: string, mtime: number): Promise<PastSessio
     } finally { await fh.close(); }
   } catch { /* tolerate */ }
   return {
-    id: h ? h.id : path.basename(file),
+    // pi's own store is a trusted source for its ids.
+    id: asPiSessionId(h ? h.id : path.basename(file)),
     title: title || '(no preview)',
     mtime,
     timestamp: h ? h.timestamp : '',
@@ -146,10 +148,11 @@ export async function listSessions(sessionsDir: string): Promise<PastSession[]> 
   }));
 }
 
-/** Read a session header back by id (resume needs cwd + exact file). */
-export function findSession(sessionsDir: string, id: string):
-  { file: string; id: string; timestamp: string; cwd: string } | null {
-  if (!/^[0-9a-zA-Z-]{1,64}$/.test(id)) return null;
+/** Read a session header back by id (resume needs cwd + exact file). The
+ *  id is branded, i.e. it passed PiSessionIdSchema at the boundary (it is
+ *  matched against file names below). */
+export function findSession(sessionsDir: string, id: PiSessionId):
+  { file: string; id: PiSessionId; timestamp: string; cwd: string } | null {
   let scopes: fs.Dirent[];
   try { scopes = fs.readdirSync(sessionsDir, { withFileTypes: true }); }
   catch { return null; }
@@ -162,7 +165,7 @@ export function findSession(sessionsDir: string, id: string):
       if (!f.endsWith('.jsonl') || !f.includes(id)) continue;
       const full = path.join(dir, f);
       const h = parseHeader(full);
-      if (h && h.id === id) return { file: full, ...h };
+      if (h && h.id === id) return { file: full, ...h, id };
     }
   }
   return null;

@@ -24,10 +24,13 @@ import {
   autoUpdateEnabled, lastCheck, lastUpdate, AutoUpdater,
 } from '../src/lib/auto-update';
 import {
-  BUSY_ERROR, PI_PACKAGE, appVersion, npmPath, piDeclared, piInstalled, runPiUpdate,
+  PI_PACKAGE, appVersion, npmPath, piDeclared, piInstalled, runPiUpdate, updateResultBody,
+  type PiUpdateFailure,
 } from '../src/lib/settings';
 import { parseClientMsg } from '../src/lib/types';
 import type { ClientMsg, ServerMsg, ConsoleState, SettingsState } from '../src/lib/types';
+import { JobNameSchema, PiSessionIdSchema, TmuxSessionNameSchema } from '../src/schemas/ids';
+import type { SessionToken, TmuxSessionName } from '../src/types/branded';
 
 // URL base path ('/' or '/foo', no trailing slash). Must match the base
 // the pages were built with (astro.config.mjs reads the same env at build).
@@ -222,6 +225,48 @@ function ipOf(req: http.IncomingMessage): string {
 function decodeSegment(s: string): string | null {
   try { return decodeURIComponent(s); } catch { return null; }
 }
+/** Run an async route body. A rejection costs one 500 — the async twin of
+ *  the createServer guard below — never an unhandled rejection (which
+ *  would take the process, and every tmux session with it, down). */
+function respond(res: http.ServerResponse, work: () => Promise<void>): void {
+  work().catch(err => {
+    console.error('request handler error', err);
+    if (!res.headersSent) send(res, 500, 'internal error'); else res.destroy();
+  });
+}
+
+/** Jobs failures → status + the { error, detail } body /jobs reads. */
+type JobFailure = jobs.SaveJobFailure | jobs.DeleteJobFailure | jobs.RunJobFailure | jobs.ListJobsFailure;
+function sendJobFailure(res: http.ServerResponse, f: JobFailure): void {
+  const body = (error: string, detail: string | null = null) => ({ error, detail });
+  switch (f.errorCode) {
+    case 'invalid_job_name':
+    case 'command_required':
+    case 'invalid_command':
+    case 'invalid_schedule':
+      sendJSON(res, 400, body(f.errorMessage ?? f.errorCode)); return;
+    case 'job_not_found':
+      sendJSON(res, 404, body(f.errorMessage ?? 'no such job')); return;
+    case 'run_active':
+      sendJSON(res, 409, body(f.errorMessage ?? 'previous run is still active', f.data?.session ?? null)); return;
+    case 'tmux_error':
+      sendJSON(res, 500, body('could not open run session', f.errorMessage ?? null)); return;
+    case 'database_error':
+      sendJSON(res, 500, body(f.errorMessage ?? 'database error')); return;
+    default:
+      f satisfies never;
+  }
+}
+
+function piUpdateStatus(f: PiUpdateFailure): number {
+  switch (f.errorCode) {
+    case 'busy': return 409;
+    case 'npm_missing':
+    case 'npm_check_failed':
+    case 'npm_failed': return 500;
+    default: return f satisfies never;
+  }
+}
 
 // ---------- origin check (DESIGN_REVIEW §1.2) ----------
 // SameSite=Strict doesn't stop sibling subdomains (same site, not same
@@ -281,7 +326,7 @@ function underBase(url: string): boolean {
   return CFG.base === '/' || url === CFG.base || url.startsWith(CFG.base + '/');
 }
 function authed(req: http.IncomingMessage): boolean {
-  return auth.valid(Auth.parseCookies(req.headers.cookie).webpi_session);
+  return auth.valid(Auth.sessionToken(req.headers.cookie));
 }
 /** Header that clears the browser's session cookie (logout, log out everywhere). */
 const clearSessionCookie = (): string =>
@@ -399,7 +444,7 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
   }
 
   if (req.method === 'POST' && url === route('/logout')) {
-    const token = Auth.parseCookies(req.headers.cookie).webpi_session;
+    const token = Auth.sessionToken(req.headers.cookie);
     auth.drop(token);
     // Logout must end the terminals this token authenticated, not just
     // future requests: they get 'signed-out' and don't reconnect.
@@ -462,18 +507,18 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
     // justification there), and the scan itself is async + title-cached
     // so the poll never holds the event loop — terminal WS traffic keeps
     // flowing while it runs.
-    const refresh = auth.cookieRefresh(Auth.parseCookies(req.headers.cookie).webpi_session, CFG.base);
-    listSessions(CFG.sessionsDir).then(sessList => {
-      tmux.listSessions((err, live) => {
-        const state: ConsoleState = {
-          me: 'ok', configured: auth.configured(),
-          live: err ? [] : live,
-          sessions: sessList.map(s => ({ ...s, hidden: hiddenSessions.has(s.id) })),
-          hiddenCount: hiddenSessions.size,
-        };
-        sendJSON(res, 200, state, refresh === null ? undefined : { 'Set-Cookie': refresh });
-      });
-    }, () => send(res, 500, 'internal error')); // unreachable: the scan tolerates junk
+    const refresh = auth.cookieRefresh(Auth.sessionToken(req.headers.cookie), CFG.base);
+    respond(res, async () => {
+      const sessList = await listSessions(CFG.sessionsDir); // tolerates junk, never rejects
+      const live = await tmux.listSessions();
+      const state: ConsoleState = {
+        me: 'ok', configured: auth.configured(),
+        live,
+        sessions: sessList.map(s => ({ ...s, hidden: hiddenSessions.has(s.id) })),
+        hiddenCount: hiddenSessions.size,
+      };
+      sendJSON(res, 200, state, refresh === null ? undefined : { 'Set-Cookie': refresh });
+    });
     return;
   }
 
@@ -482,22 +527,22 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
       if (err) { send(res, 400, 'bad request'); return; }
       const parsed = api.newSessionBody.safeParse(body);
       if (!parsed.success) { send(res, 400, api.firstIssue(parsed.error)); return; }
-      const name = parsed.data.name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-')
+      const slug = parsed.data.name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-')
         .replace(/^-+|-+$/g, '').slice(0, 30);
-      if (!name) { send(res, 400, 'name required'); return; }
-      tmux.newSession(name, CFG.newSessionCwd, CFG.command, sessionEnv, err2 => {
-        if (err2) {
+      if (!slug) { send(res, 400, 'name required'); return; }
+      const name = TmuxSessionNameSchema.safeParse(slug); // always passes: the slug is in-charset
+      if (!name.success) { send(res, 400, api.firstIssue(name.error)); return; }
+      respond(res, async () => {
+        const created = await tmux.newSession(name.data, CFG.newSessionCwd, CFG.command, sessionEnv);
+        if (created.ok) { sendJSON(res, 200, { name: created.data.name }); return; }
+        switch (created.errorCode) {
           // The never-fork guard's refusal is a distinct, user-facing
           // error (503 — retryable once the workspace side is back),
           // unlike a taken name (409).
-          if (err2.message.startsWith(tmux.SERVER_NOT_RUNNING_MSG)) {
-            sendJSON(res, 503, { error: err2.message });
-          } else {
-            sendJSON(res, 409, { error: 'could not create session (name taken?)' });
-          }
-          return;
+          case 'server_not_running': sendJSON(res, 503, { error: created.errorMessage }); return;
+          case 'tmux_error': sendJSON(res, 409, { error: 'could not create session (name taken?)' }); return;
+          default: created satisfies never;
         }
-        sendJSON(res, 200, { name });
       });
     });
     return;
@@ -508,12 +553,23 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
   // no degraded mode anymore.
   if (url === route('/api/jobs') || url.startsWith(route('/api/jobs/'))) {
     const sub = url.slice(route('/api/jobs').length);
-    const fail = (e: Error): void => sendJSON(res, 500, { error: e.message });
-    const reply = (r: jobs.JobOp): void => sendJSON(res, r.ok ? 200 : r.status,
-      r.ok ? { name: r.name, session: r.session ?? null } : { error: r.error, detail: r.detail });
+    // A job name from the path: undecodable → 400 'bad job name' (a bad
+    // escape used to throw out of the handler); off-charset → the same
+    // 400 'invalid job name' the domain answers for a bad save.
+    const jobName = (segment: string) => {
+      const decoded = decodeSegment(segment);
+      if (decoded === null) { send(res, 400, 'bad job name'); return null; }
+      const name = JobNameSchema.safeParse(decoded);
+      if (!name.success) { sendJSON(res, 400, { error: 'invalid job name', detail: null }); return null; }
+      return name.data;
+    };
 
     if (req.method === 'GET' && sub === '') {
-      scheduler.listJobs().then(st => sendJSON(res, 200, st)).catch(fail);
+      respond(res, async () => {
+        const listed = await scheduler.listJobs();
+        if (!listed.ok) { sendJobFailure(res, listed); return; }
+        sendJSON(res, 200, listed.data);
+      });
       return;
     }
     if (req.method === 'POST' && (sub === '' || sub === '/validate')) {
@@ -526,23 +582,35 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
         } else {
           const parsed = api.jobSaveBody.safeParse(body);
           if (!parsed.success) { send(res, 400, api.firstIssue(parsed.error)); return; }
-          scheduler.saveJob(parsed.data).then(reply).catch(fail);
+          respond(res, async () => {
+            const saved = await scheduler.saveJob(parsed.data);
+            if (!saved.ok) { sendJobFailure(res, saved); return; }
+            sendJSON(res, 200, { name: saved.data.name, session: null });
+          });
         }
       });
       return;
     }
     const runNow = sub.match(/^\/([^/]+)\/run$/);
     if (req.method === 'POST' && runNow) {
-      const name = decodeSegment(runNow[1]!);
-      if (name === null) { send(res, 400, 'bad job name'); return; }
-      scheduler.runJob(name).then(reply).catch(fail);
+      const name = jobName(runNow[1]!);
+      if (name === null) return;
+      respond(res, async () => {
+        const run = await scheduler.runJob(name);
+        if (!run.ok) { sendJobFailure(res, run); return; }
+        sendJSON(res, 200, { name: run.data.name, session: run.data.session });
+      });
       return;
     }
     const remove = sub.match(/^\/([^/]+)$/);
     if (req.method === 'DELETE' && remove) {
-      const name = decodeSegment(remove[1]!);
-      if (name === null) { send(res, 400, 'bad job name'); return; }
-      scheduler.deleteJob(name).then(reply).catch(fail);
+      const name = jobName(remove[1]!);
+      if (name === null) return;
+      respond(res, async () => {
+        const deleted = await scheduler.deleteJob(name);
+        if (!deleted.ok) { sendJobFailure(res, deleted); return; }
+        sendJSON(res, 200, { name: deleted.data.name, session: null });
+      });
       return;
     }
     send(res, 404, 'not found');
@@ -556,8 +624,8 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
       if (err) { send(res, 400, 'bad request'); return; }
       const parsed = api.hideBody.safeParse(body);
       if (!parsed.success) { send(res, 400, api.firstIssue(parsed.error)); return; }
-      const saveErr = hiddenSessions.hide(parsed.data.id);
-      if (saveErr) { sendJSON(res, 500, { error: 'could not save hidden state' }); return; }
+      const saved = hiddenSessions.hide(parsed.data.id);
+      if (!saved.ok) { sendJSON(res, 500, { error: 'could not save hidden state' }); return; }
       sendJSON(res, 200, { ok: true });
     });
     return;
@@ -570,8 +638,8 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
       // Fixed message: a failed parse is always an all/id shape problem,
       // and zod's own union error would only say 'Invalid input'.
       if (!parsed.success) { send(res, 400, 'invalid session id'); return; }
-      const saveErr = 'all' in parsed.data ? hiddenSessions.unhideAll() : hiddenSessions.unhide(parsed.data.id);
-      if (saveErr) { sendJSON(res, 500, { error: 'could not save hidden state' }); return; }
+      const saved = 'all' in parsed.data ? hiddenSessions.unhideAll() : hiddenSessions.unhide(parsed.data.id);
+      if (!saved.ok) { sendJSON(res, 500, { error: 'could not save hidden state' }); return; }
       sendJSON(res, 200, { ok: true });
     });
     return;
@@ -616,8 +684,9 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
       if (err) { send(res, 400, 'bad request'); return; }
       const parsed = api.updatePiBody.safeParse(body);
       if (!parsed.success) { send(res, 400, api.firstIssue(parsed.error)); return; }
-      runPiUpdate(APP_ROOT, parsed.data.dryRun, r => {
-        sendJSON(res, r.ok ? 200 : (r.error === BUSY_ERROR ? 409 : 500), r);
+      respond(res, async () => {
+        const r = await runPiUpdate(APP_ROOT, parsed.data.dryRun);
+        sendJSON(res, r.ok ? 200 : piUpdateStatus(r), updateResultBody(r));
       });
     });
     return;
@@ -634,8 +703,8 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
     readBody(req, (err, body) => {
       if (err) { send(res, 400, 'bad request'); return; }
       if (typeof body?.enabled !== 'boolean') { send(res, 400, 'enabled must be a boolean'); return; }
-      try { autoUpdater.setEnabled(body.enabled); }
-      catch (err2) { sendJSON(res, 500, { error: `could not save the setting: ${(err2 as Error).message}` }); return; }
+      const saved = autoUpdater.setEnabled(body.enabled);
+      if (!saved.ok) { sendJSON(res, 500, { error: saved.errorMessage }); return; }
       sendJSON(res, 200, { ok: true, enabled: body.enabled });
     });
     return;
@@ -665,14 +734,14 @@ const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
 // already validated it): POST /logout, log-out-everywhere and shutdown
 // must end the terminals a token authenticated — not merely stop future
 // requests — and shutdown must be able to reach every client.
-const socketsByToken = new Map<string, Set<WebSocket>>();
+const socketsByToken = new Map<SessionToken, Set<WebSocket>>();
 
-function trackSocket(token: string, ws: WebSocket): void {
+function trackSocket(token: SessionToken, ws: WebSocket): void {
   let set = socketsByToken.get(token);
   if (!set) { set = new Set(); socketsByToken.set(token, set); }
   set.add(ws);
 }
-function untrackSocket(token: string, ws: WebSocket): void {
+function untrackSocket(token: SessionToken, ws: WebSocket): void {
   const set = socketsByToken.get(token);
   if (!set) return;
   set.delete(ws);
@@ -688,7 +757,7 @@ function closeSoon(ws: WebSocket): void {
 }
 
 /** Send `final`, then end every socket authenticated with `token`. */
-function closeTokenSockets(token: string, final: ServerMsg): void {
+function closeTokenSockets(token: SessionToken, final: ServerMsg): void {
   const set = socketsByToken.get(token);
   if (!set) return;
   socketsByToken.delete(token);
@@ -717,7 +786,7 @@ server.on('upgrade', (req, socket, head) => {
   // a missing header is destroyed, not waved through.
   const origin = req.headers.origin;
   if (!origin || !originOk(req)) { socket.destroy(); return; }
-  const token = Auth.parseCookies(req.headers.cookie).webpi_session;
+  const token = Auth.sessionToken(req.headers.cookie);
   if (!auth.valid(token)) {
     socket.write(`HTTP/1.1 401 Unauthorized\r\n${securityHeaderBlock()}\r\n`);
     socket.destroy();
@@ -742,7 +811,7 @@ function wsSend(ws: WebSocket, msg: ServerMsg): void {
 // tick means the peer is gone — terminate, and the pty is reaped.
 const PING_INTERVAL_MS = 30_000;
 
-function attach(ws: WebSocket, token: string): void {
+function attach(ws: WebSocket, token: SessionToken): void {
   trackSocket(token, ws);
   let p: Pty | null = null;
   // Attach in flight: the spawn is one async step deeper than it used to
@@ -757,33 +826,32 @@ function attach(ws: WebSocket, token: string): void {
   // browser terminal ("terminal not fitting on open").
   let size = { cols: 80, rows: 24 };
 
-  function spawnTmux(args: string[], label: string): void {
+  async function spawnTmux(target: TmuxSessionName): Promise<void> {
     // Never-fork gate, same as the create paths: attach is a forking
     // tmux command too — on an absolute socket it must not run against a
     // missing/stale socket (that forks a server as the web uid).
-    tmux.requireServer(err => {
-      if (err) { starting = false; wsSend(ws, { type: 'error', message: tmux.SERVER_NOT_RUNNING_MSG }); return; }
-      const env = Object.assign({}, process.env, {
-        TERM: 'xterm-256color', COLORTERM: 'truecolor', HOME: CFG.home,
-        PI_CODING_AGENT_DIR: CFG.agentDir,
-      });
-      let x: Pty;
-      try {
-        x = pty.spawn('tmux', [...tmux.socketArgs(tmux.SOCKET), 'attach', '-d', '-t', ...args],
-          { name: 'xterm-256color', cols: size.cols, rows: size.rows, cwd: CFG.newSessionCwd, env }) as Pty;
-      } catch (e) {
-        starting = false;
-        wsSend(ws, { type: 'error', message: 'spawn failed: ' + (e as Error).message });
-        return;
-      }
-      x.onData(d => wsSend(ws, { type: 'output', data: d }));
-      x.onExit(() => { wsSend(ws, { type: 'exit', target: label }); ws.close(); });
-      p = x;
-      wsSend(ws, { type: 'attached', target: label, socket: tmux.SOCKET });
+    const server = await tmux.requireServer();
+    if (!server.ok) { starting = false; wsSend(ws, { type: 'error', message: tmux.SERVER_NOT_RUNNING_MSG }); return; }
+    const env = Object.assign({}, process.env, {
+      TERM: 'xterm-256color', COLORTERM: 'truecolor', HOME: CFG.home,
+      PI_CODING_AGENT_DIR: CFG.agentDir,
     });
+    let x: Pty;
+    try {
+      x = pty.spawn('tmux', [...tmux.socketArgs(tmux.SOCKET), 'attach', '-d', '-t', target],
+        { name: 'xterm-256color', cols: size.cols, rows: size.rows, cwd: CFG.newSessionCwd, env }) as Pty;
+    } catch (e) {
+      starting = false;
+      wsSend(ws, { type: 'error', message: 'spawn failed: ' + (e as Error).message });
+      return;
+    }
+    x.onData(d => wsSend(ws, { type: 'output', data: d }));
+    x.onExit(() => { wsSend(ws, { type: 'exit', target }); ws.close(); });
+    p = x;
+    wsSend(ws, { type: 'attached', target, socket: tmux.SOCKET });
   }
 
-  function onMessage(msg: ClientMsg): void {
+  async function onMessage(msg: ClientMsg): Promise<void> {
     if (msg.type === 'input') {
       // Written whole: the client splits big pastes into consecutive input
       // frames (agent-terminal.ts), and maxPayload bounds any one frame.
@@ -800,29 +868,30 @@ function attach(ws: WebSocket, token: string): void {
         wsSend(ws, { type: 'error', message });
       };
       if (msg.mode === 'live') {
-        const target = msg.target;
-        if (!tmux.NAME_RE.test(target)) { failed('bad target'); return; }
-        tmux.hasSession(target, (_e, exists) => {
-          if (!exists) { failed('no such live session'); return; }
-          spawnTmux([target], target);
-        });
+        const target = TmuxSessionNameSchema.safeParse(msg.target);
+        if (!target.success) { failed('bad target'); return; }
+        if (!await tmux.hasSession(target.data)) { failed('no such live session'); return; }
+        await spawnTmux(target.data);
       } else {
-        const found = findSession(CFG.sessionsDir, msg.id);
+        const id = PiSessionIdSchema.safeParse(msg.id);
+        const found = id.success ? findSession(CFG.sessionsDir, id.data) : null;
         if (!found) { failed('no such session'); return; }
         let cwd = CFG.newSessionCwd;
         if (found.cwd) {
           try { if (fs.statSync(found.cwd).isDirectory()) cwd = found.cwd; } catch { /* fallback */ }
         }
         const name = tmux.resumeSessionName(found.id);
-        tmux.resumeSession(name, cwd, CFG.command, found.id, sessionEnv, err => {
-          if (err) {
-            failed(err.message.startsWith(tmux.SERVER_NOT_RUNNING_MSG)
-              ? tmux.SERVER_NOT_RUNNING_MSG // the never-fork guard — say it, don't bury it
-              : 'could not start resume session');
-            return;
+        const resumed = await tmux.resumeSession(name, cwd, CFG.command, found.id, sessionEnv);
+        if (!resumed.ok) {
+          switch (resumed.errorCode) {
+            // the never-fork guard — say it, don't bury it
+            case 'server_not_running': failed(tmux.SERVER_NOT_RUNNING_MSG); return;
+            case 'tmux_error': failed('could not start resume session'); return;
+            default: resumed satisfies never;
           }
-          spawnTmux([name], name);
-        });
+          return;
+        }
+        await spawnTmux(name);
       }
     }
   }
@@ -830,8 +899,7 @@ function attach(ws: WebSocket, token: string): void {
   ws.on('message', raw => {
     const msg = parseClientMsg(Buffer.from(raw as Buffer).toString('utf8'));
     if (!msg) return; // malformed frames are dropped, never thrown on
-    try { onMessage(msg); }
-    catch (err) { console.error('ws message handler error', err); }
+    onMessage(msg).catch(err => console.error('ws message handler error', err));
   });
 
   let alive = true;

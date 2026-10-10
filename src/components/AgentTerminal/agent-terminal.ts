@@ -14,7 +14,8 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import '@awesome.me/webawesome/dist/components/spinner/spinner.js';
 import '@awesome.me/webawesome/dist/components/icon/icon.js';
-import type { ClientMsg, ServerMsg } from '../../lib/types';
+import type { ActiveKey, ClientMsg, ServerMsg } from '../../lib/types';
+import type { PiSessionId, TmuxSessionName } from '../../types/branded';
 import { BASE } from '../../base';
 
 /** Max UTF-16 units per input frame. JSON spends at most 6 bytes on one
@@ -47,12 +48,12 @@ export class AgentTerminal extends HTMLElement {
   terminal?: Terminal;
   fitXtermAddon?: FitAddon;
   websocket?: WebSocket;
-  activeKey?: string;
+  activeKey?: ActiveKey;
   resizeObserver?: ResizeObserver;
   /** tmux session the server last attached us to — where a reconnect goes,
    *  always in live mode: a resume is never re-run, so a pi that exited in
    *  the meantime ends in 'no such live session', not a fresh pi. */
-  private attachedTarget: string | null = null;
+  private attachedTarget: TmuxSessionName | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelay = RECONNECT_MIN_MS;
   /** Back online / tab visible again: skip the rest of a pending backoff. */
@@ -157,7 +158,7 @@ export class AgentTerminal extends HTMLElement {
     (el.lastElementChild as HTMLElement).textContent = text;
   }
 
-  attach(mode: 'live' | 'resume', target: string, key: string): void {
+  attach(mode: 'live' | 'resume', target: TmuxSessionName | PiSessionId, key: ActiveKey): void {
     this.cancelReconnect();
     this.closeSocket();
     this.terminal?.reset();
@@ -171,7 +172,7 @@ export class AgentTerminal extends HTMLElement {
 
   /** Open a socket and send one attach. A close the server didn't announce
    *  (no 'exit' / 'error' first) after a successful attach reconnects. */
-  private connect(msg: ClientMsg, label: string, key: string): void {
+  private connect(msg: ClientMsg, label: string, key: ActiveKey): void {
     this.status(`connecting: ${label} …`, 'busy');
 
     // Browser WebSocket only accepts ws:/wss: — and the server's upgrade

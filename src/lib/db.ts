@@ -23,9 +23,33 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import type { ResultFailure, ResultSuccess } from '../types/result';
 
-/** pi session ids (uuid); also caps junk written into the state db. */
-export const SESSION_ID_RE = /^[0-9a-zA-Z-]{1,64}$/;
+/** The shared "generic update" result: a write that only reports how many
+ *  rows it touched (setters, deletes, flag flips). */
+export type DatabaseUpdateData = { changes: number };
+export type DatabaseUpdateErrorCode = 'database_error';
+export type DatabaseUpdateSuccess = ResultSuccess<'database_update', DatabaseUpdateData>;
+export type DatabaseUpdateFailure = ResultFailure<'database_update', DatabaseUpdateData, DatabaseUpdateErrorCode>;
+export type DatabaseUpdateResult = DatabaseUpdateSuccess | DatabaseUpdateFailure;
+
+/** Run one write at the db boundary: a thrown sqlite error (lock
+ *  timeout, unwritable file, a db deleted under us) becomes a
+ *  database_error failure instead of propagating. `context` prefixes the
+ *  message ("could not save hidden state: …"). */
+export function databaseUpdate(context: string, write: () => { changes: number | bigint }) {
+  try {
+    const { changes } = write();
+    return { ok: true, resultType: 'database_update', data: { changes: Number(changes) } } satisfies DatabaseUpdateSuccess;
+  } catch (err) {
+    return {
+      ok: false,
+      resultType: 'database_update',
+      errorCode: 'database_error',
+      errorMessage: `${context}: ${(err as Error).message}`,
+    } satisfies DatabaseUpdateFailure;
+  }
+}
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS credential (
@@ -47,7 +71,7 @@ const SCHEMA = `
   -- (typed by the authenticated user) — it only ever reaches tmux as
   -- tmux's own command string, never a server-side shell.
   CREATE TABLE IF NOT EXISTS jobs (
-    name       TEXT    PRIMARY KEY,  -- JOB_NAME_RE (src/lib/jobs.ts)
+    name       TEXT    PRIMARY KEY,  -- JOB_NAME_RE (src/schemas/patterns.ts)
     schedule   TEXT    NOT NULL,     -- 5-field cron
     command    TEXT    NOT NULL,
     created_at INTEGER NOT NULL      -- epoch ms; catch-up reference until the first fire
@@ -119,10 +143,11 @@ export class StateDb {
     return row?.value ?? null;
   }
 
-  /** Write one app-settings value. Throws on db failure — callers decide
-   *  how failure reaches the user (the API 500s instead of lying). */
-  setSetting(key: string, value: string): void {
-    this.stmt('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value')
+  /** Write one app-settings value. Throws on db failure — callers wrap it
+   *  in databaseUpdate() so failure reaches the user as a Result (the API
+   *  500s instead of lying). */
+  setSetting(key: string, value: string): { changes: number | bigint } {
+    return this.stmt('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value')
       .run(key, value);
   }
 }

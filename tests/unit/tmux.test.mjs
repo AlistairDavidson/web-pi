@@ -17,8 +17,9 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webpi-tmux-test-'));
 process.env.WEB_PI_TMUX_SOCKET = path.join(dir, 'tmux');
 
 const { socketArgs, forksServer, isServerDown, SERVER_NOT_RUNNING_MSG, requireServer,
-        newSession, resumeSession, hasSession, liveSessionNames } =
+        newSession, resumeSession, hasSession, liveSessionNames, jobSessionName, resumeSessionName } =
   await import('../../dist-server/src/lib/tmux.js');
+const { TmuxSessionNameSchema } = await import('../../dist-server/src/schemas/ids.js');
 
 const SOCKET = process.env.WEB_PI_TMUX_SOCKET;
 
@@ -56,6 +57,24 @@ test('isServerDown: down-server errors, an answering server, unknown failures', 
   assert.equal(isServerDown(Object.assign(new Error('x'), { stderr: Buffer.from('no server running on /x') })), true);
 });
 
+test('jobSessionName: every valid job name yields a valid tmux session name (40-char names included)', () => {
+  // JOB_NAME_RE allows 40 chars; 'webpi-' + 40 = 46. The old 40-char tmux
+  // name cap rejected these runs outright (newSession refused, hasSession
+  // always false) — the brand now promises validity, this holds it to that.
+  for (const job of ['a', 'nightly-check', 'x'.repeat(40), 'a_b-c'.repeat(8)]) {
+    assert.equal(TmuxSessionNameSchema.safeParse(jobSessionName(job)).success, true, job);
+  }
+});
+
+test('resumeSessionName: r-<full id>, hashed only when the id would not fit', () => {
+  const id = '019f4706-0000-7000-8000-000000000001';
+  assert.equal(resumeSessionName(id), `r-${id}`);
+  const long = 'a'.repeat(64);
+  const hashed = resumeSessionName(long);
+  assert.match(hashed, /^r-[0-9a-f]{32}$/);
+  assert.equal(TmuxSessionNameSchema.safeParse(hashed).success, true);
+});
+
 // ---------- functional (real tmux, absolute-path socket, split mode) ----------
 
 /** Bring the server up the way the workspace entrypoint does: -f conf
@@ -74,13 +93,14 @@ function startServer() {
 test('requireServer (the guard runner, absolute socket): refuses while down, passes once a server answers', { skip: !haveTmux }, async () => {
   // The export every guarded call site (new/resume/attach spawn) uses.
   assert.equal(fs.existsSync(SOCKET), false);
-  const refused = await new Promise(resolve => requireServer(resolve));
-  assert.ok(refused instanceof Error, 'must refuse with an error');
-  assert.ok(refused.message.startsWith(SERVER_NOT_RUNNING_MSG), refused.message);
+  const refused = await requireServer();
+  assert.equal(refused.ok, false, 'must refuse');
+  assert.equal(refused.errorCode, 'server_not_running');
+  assert.ok(refused.errorMessage.startsWith(SERVER_NOT_RUNNING_MSG), refused.errorMessage);
   assert.equal(fs.existsSync(SOCKET), false, 'must not fork a tmux server');
   startServer();
-  const ok = await new Promise(resolve => requireServer(resolve));
-  assert.equal(ok, null);
+  const ok = await requireServer();
+  assert.equal(ok.ok, true);
   execFileSync('tmux', ['-S', SOCKET, 'kill-server']);
   fs.rmSync(SOCKET, { force: true }); // a lingering stale socket must not trip the next test
 });
@@ -88,10 +108,10 @@ test('requireServer (the guard runner, absolute socket): refuses while down, pas
 test('never-fork guard: no server → clear error, and NO server gets forked', { skip: !haveTmux }, async () => {
   assert.equal(tmuxUp(), false);
   assert.equal(fs.existsSync(SOCKET), false);
-  const err = await new Promise(resolve =>
-    newSession('guardtest', dir, ['/bin/sh', '-c', 'true'], {}, resolve));
-  assert.ok(err instanceof Error, 'newSession must fail');
-  assert.ok(err.message.startsWith(SERVER_NOT_RUNNING_MSG), err.message);
+  const refused = await newSession('guardtest', dir, ['/bin/sh', '-c', 'true'], {});
+  assert.equal(refused.ok, false, 'newSession must fail');
+  assert.equal(refused.errorCode, 'server_not_running');
+  assert.ok(refused.errorMessage.startsWith(SERVER_NOT_RUNNING_MSG), refused.errorMessage);
   assert.equal(fs.existsSync(SOCKET), false, 'must not fork a tmux server as the web uid');
 });
 
@@ -99,36 +119,37 @@ test('guarded create works once the workspace side owns a live server', { skip: 
   startServer();
   assert.equal(tmuxUp(), true);
   const marker = path.join(dir, 'marker.txt');
-  const err = await new Promise(resolve =>
-    newSession('live1', dir, ['/bin/sh', '-c', `echo ok > ${JSON.stringify(marker)}; sleep 5`], {}, resolve));
-  assert.equal(err, null);
+  const created = await newSession('live1', dir, ['/bin/sh', '-c', `echo ok > ${JSON.stringify(marker)}; sleep 5`], {});
+  assert.deepEqual(created, { ok: true, resultType: 'tmux_session', data: { name: 'live1' } });
   // The session really runs on the shared socket.
-  assert.equal(await new Promise(r => hasSession('live1', (_e, ok) => r(ok))), true);
-  const names = await new Promise(r => liveSessionNames((_e, s) => r(s)));
+  assert.equal(await hasSession('live1'), true);
+  const names = await liveSessionNames();
   assert.ok(names.has('live1'));
+  // A taken name is tmux's own failure — tmux_error, not the guard.
+  const dup = await newSession('live1', dir, ['/bin/sh', '-c', 'true'], {});
+  assert.equal(dup.ok, false);
+  assert.equal(dup.errorCode, 'tmux_error');
   // -e env delivery through the guarded path.
   const envfile = path.join(dir, 'env.txt');
-  const err2 = await new Promise(resolve =>
-    newSession('live2', dir, ['/bin/sh', '-c', `echo $SPLIT_PROBE > ${JSON.stringify(envfile)}; sleep 5`],
-      { SPLIT_PROBE: 'delivered' }, resolve));
-  assert.equal(err2, null);
+  const created2 = await newSession('live2', dir, ['/bin/sh', '-c', `echo $SPLIT_PROBE > ${JSON.stringify(envfile)}; sleep 5`],
+    { SPLIT_PROBE: 'delivered' });
+  assert.equal(created2.ok, true);
   await new Promise(r => setTimeout(r, 500));
   assert.equal(fs.readFileSync(envfile, 'utf8').trim(), 'delivered');
 });
 
 test('resume path: reuse when the session exists, guard when the server is down', { skip: !haveTmux }, async () => {
   // Existing resume session → no create, no error.
-  const err = await new Promise(resolve =>
-    resumeSession('live1', dir, ['/bin/sh'], '019f4706-0000-7000-8000-000000000009', {}, resolve));
-  assert.equal(err, null);
+  const reused = await resumeSession('live1', dir, ['/bin/sh'], '019f4706-0000-7000-8000-000000000009', {});
+  assert.equal(reused.ok, true);
   execFileSync('tmux', ['-S', SOCKET, 'kill-server']);
   assert.equal(tmuxUp(), false);
   // Server down → the resume-create branch hits the same guard.
-  const err2 = await new Promise(resolve =>
-    resumeSession('r-019f4706-0000-7000-8000-000000000010', dir, ['/bin/sh'],
-      '019f4706-0000-7000-8000-000000000010', {}, resolve));
-  assert.ok(err2 instanceof Error);
-  assert.ok(err2.message.startsWith(SERVER_NOT_RUNNING_MSG), err2.message);
+  const refused = await resumeSession('r-019f4706-0000-7000-8000-000000000010', dir, ['/bin/sh'],
+    '019f4706-0000-7000-8000-000000000010', {});
+  assert.equal(refused.ok, false);
+  assert.equal(refused.errorCode, 'server_not_running');
+  assert.ok(refused.errorMessage.startsWith(SERVER_NOT_RUNNING_MSG), refused.errorMessage);
 });
 
 test('umask 0007 on the tmux server is inherited by what it spawns (group-readable session files)', { skip: !haveTmux }, async () => {
@@ -139,8 +160,7 @@ test('umask 0007 on the tmux server is inherited by what it spawns (group-readab
   startServer();
   try {
     const probe = path.join(dir, 'umask-probe.txt');
-    await new Promise(resolve =>
-      newSession('umasktest', dir, ['/bin/sh', '-c', `touch ${JSON.stringify(probe)}; sleep 2`], {}, resolve));
+    await newSession('umasktest', dir, ['/bin/sh', '-c', `touch ${JSON.stringify(probe)}; sleep 2`], {});
     await new Promise(r => setTimeout(r, 500));
     assert.equal(fs.statSync(probe).mode & 0o777, 0o660,
       'pane-spawned files must be group-rw under umask 0007');

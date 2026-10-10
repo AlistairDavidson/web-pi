@@ -7,6 +7,7 @@
 // credential row exists (set it with `npm run set-password`).
 import * as crypto from 'node:crypto';
 import type { StateDb } from './db';
+import { asSessionToken, type SessionToken } from '../types/branded';
 
 const SCRYPT = { N: 16384, r: 8, p: 1, keylen: 64 };
 const SESSION_TTL_MS = 7 * 24 * 3600 * 1000;        // sliding: idle expiry
@@ -33,7 +34,7 @@ interface SessionRec {
 }
 
 export class Auth {
-  private sessions = new Map<string, SessionRec>(); // token -> clocks
+  private sessions = new Map<SessionToken, SessionRec>(); // token -> clocks
   private readonly idleMs: number;
   private readonly absoluteMs: number;
 
@@ -77,8 +78,8 @@ export class Auth {
     return uOk && pOk;
   }
 
-  newSession(): string {
-    const token = crypto.randomBytes(32).toString('hex');
+  newSession(): SessionToken {
+    const token = asSessionToken(crypto.randomBytes(32).toString('hex'));
     const now = Date.now();
     this.sessions.set(token, { exp: now + this.idleMs, created: now, cookieAt: now });
     for (const [t, s] of this.sessions) if (this.dead(s, now)) this.sessions.delete(t);
@@ -91,7 +92,7 @@ export class Auth {
   }
 
   /** Validate a token; sliding renewal on use, bounded by the absolute cap. */
-  valid(token: string | undefined): boolean {
+  valid(token: SessionToken | undefined): boolean {
     if (!token) return false;
     const s = this.sessions.get(token);
     if (!s) return false;
@@ -101,7 +102,7 @@ export class Auth {
     return true;
   }
 
-  drop(token: string | undefined): void { if (token) this.sessions.delete(token); }
+  drop(token: SessionToken | undefined): void { if (token) this.sessions.delete(token); }
 
   /** Validity peek WITHOUT renewal — for liveness sweeps on established
    *  WS terminals. WS traffic must never slide a token (only authed HTTP
@@ -110,7 +111,7 @@ export class Auth {
    *  cap, or a logout — is closed by the server's sweep instead of
    *  riding the WS keepalive forever. Pure peek: no Map mutation (the
    *  next authed HTTP touch or newSession purge does the deleting). */
-  alive(token: string | undefined): boolean {
+  alive(token: SessionToken | undefined): boolean {
     if (!token) return false;
     const s = this.sessions.get(token);
     return !!s && !this.dead(s, Date.now());
@@ -134,7 +135,7 @@ export class Auth {
    *  Precondition: only called from /api/state, which sits behind
    *  auth.valid()'s renewal — the token was just touched. A dead or
    *  unknown token answers null (no header) rather than a stale one. */
-  cookieRefresh(token: string | undefined, path = '/'): string | null {
+  cookieRefresh(token: SessionToken | undefined, path = '/'): string | null {
     if (!token) return null;
     const s = this.sessions.get(token);
     if (!s) return null;
@@ -145,9 +146,17 @@ export class Auth {
     return this.cookieHeader(token, path);
   }
 
-  cookieHeader(token: string, path = '/'): string {
+  cookieHeader(token: SessionToken, path = '/'): string {
     return `webpi_session=${token}; HttpOnly; Secure; SameSite=Strict; ` +
       `Path=${path}; Max-Age=${Math.floor(this.idleMs / 1000)}`;
+  }
+
+  /** The session token a request carries (its webpi_session cookie), as
+   *  the brand the session APIs take — the one place a cookie value
+   *  becomes a SessionToken. Whether it is VALID is valid()'s call. */
+  static sessionToken(cookieHeader: string | undefined): SessionToken | undefined {
+    const raw = Auth.parseCookies(cookieHeader).webpi_session;
+    return raw === undefined ? undefined : asSessionToken(raw);
   }
 
   static parseCookies(header: string | undefined): Record<string, string> {
